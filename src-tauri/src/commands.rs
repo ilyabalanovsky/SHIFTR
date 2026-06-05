@@ -1,8 +1,9 @@
 use crate::{
+    capabilities,
     engines::resolve_output_path,
     models::{
         category_for_extension, default_presets, extension_for_path, ConversionJob, CreateJobGroup, FileCategory, JobStatus,
-        ProbeResult, QueueOptions, SupportedFormats, AUDIO_FORMATS, IMAGE_FORMATS, VIDEO_FORMATS,
+        ConversionCapabilities, DocumentJobOptions, ProbeResult, QueueOptions, SupportedFormats, AUDIO_FORMATS, DOCUMENT_FORMATS, IMAGE_FORMATS, VIDEO_FORMATS,
     },
     queue::{default_parallelism, QueueState},
 };
@@ -16,9 +17,15 @@ pub fn get_supported_formats() -> SupportedFormats {
         video: VIDEO_FORMATS.iter().map(|item| item.to_string()).collect(),
         audio: AUDIO_FORMATS.iter().map(|item| item.to_string()).collect(),
         image: IMAGE_FORMATS.iter().map(|item| item.to_string()).collect(),
+        document: DOCUMENT_FORMATS.iter().map(|item| item.to_string()).collect(),
         presets: default_presets(),
         default_parallelism: default_parallelism(),
     }
+}
+
+#[tauri::command]
+pub fn get_conversion_capabilities(ffmpeg_path: Option<String>) -> ConversionCapabilities {
+    capabilities::get_capabilities(ffmpeg_path)
 }
 
 #[tauri::command]
@@ -67,13 +74,15 @@ pub async fn create_jobs(
 
         jobs.push(ConversionJob {
             id: Uuid::new_v4().to_string(),
-            input_path: path,
+            input_path: path.clone(),
+            input_paths: vec![path],
             output_path,
             source_format,
             target_format: options.target_format.clone(),
             category,
             preset: options.preset.clone(),
             advanced_options: options.advanced_options.clone(),
+            document_operation: None,
             status: JobStatus::Queued,
             progress: 0.0,
             speed: None,
@@ -107,13 +116,15 @@ pub async fn create_jobs_batch(
 
             jobs.push(ConversionJob {
                 id: Uuid::new_v4().to_string(),
-                input_path: path,
+                input_path: path.clone(),
+                input_paths: vec![path],
                 output_path,
                 source_format,
                 target_format: group.options.target_format.clone(),
                 category,
                 preset: group.options.preset.clone(),
                 advanced_options: group.options.advanced_options.clone(),
+                document_operation: None,
                 status: JobStatus::Queued,
                 progress: 0.0,
                 speed: None,
@@ -125,6 +136,92 @@ pub async fn create_jobs_batch(
 
     state.add_jobs(jobs.clone()).await;
     Ok(state.jobs().await)
+}
+
+#[tauri::command]
+pub async fn create_document_job(
+    options: DocumentJobOptions,
+    state: State<'_, Arc<QueueState>>,
+) -> Result<Vec<ConversionJob>, String> {
+    let first_path = options.paths.first().ok_or_else(|| "No document inputs selected".to_string())?.clone();
+    validate_document_inputs(&options)?;
+    let output_dir = options
+        .output_dir
+        .clone()
+        .or_else(|| Path::new(&first_path).parent().map(|path| path.to_string_lossy().to_string()))
+        .ok_or_else(|| "Cannot resolve output directory".to_string())?;
+    let output_name = options.output_name.unwrap_or_else(|| match options.operation {
+        crate::models::DocumentOperation::ImagesToPdf => "images.pdf".into(),
+        crate::models::DocumentOperation::MergePdfs => "merged.pdf".into(),
+    });
+    let output_path = resolve_document_output_path(&output_dir, &output_name)?;
+
+    let job = ConversionJob {
+        id: Uuid::new_v4().to_string(),
+        input_path: first_path,
+        input_paths: options.paths,
+        output_path: output_path.to_string_lossy().to_string(),
+        source_format: "documents".into(),
+        target_format: "pdf".into(),
+        category: FileCategory::Document,
+        preset: default_presets().into_iter().next().ok_or_else(|| "Missing default preset".to_string())?,
+        advanced_options: None,
+        document_operation: Some(options.operation),
+        status: JobStatus::Queued,
+        progress: 0.0,
+        speed: None,
+        eta_seconds: None,
+        error: None,
+    };
+
+    state.add_jobs(vec![job]).await;
+    Ok(state.jobs().await)
+}
+
+fn ensure_pdf_extension(name: &str) -> String {
+    if name.to_ascii_lowercase().ends_with(".pdf") {
+        name.into()
+    } else {
+        format!("{name}.pdf")
+    }
+}
+
+fn validate_document_inputs(options: &DocumentJobOptions) -> Result<(), String> {
+    for path in &options.paths {
+        let category = category_for_extension(&extension_for_path(path));
+        match options.operation {
+            crate::models::DocumentOperation::ImagesToPdf if category != FileCategory::Image => {
+                return Err(format!("{} is not an image input", path));
+            }
+            crate::models::DocumentOperation::MergePdfs if category != FileCategory::Document => {
+                return Err(format!("{} is not a PDF input", path));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+fn resolve_document_output_path(output_dir: &str, output_name: &str) -> Result<std::path::PathBuf, String> {
+    let base_path = Path::new(output_dir).join(ensure_pdf_extension(output_name));
+    if !base_path.exists() {
+        return Ok(base_path);
+    }
+
+    let stem = base_path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "Invalid output file name".to_string())?;
+    let parent = base_path.parent().ok_or_else(|| "Invalid output directory".to_string())?;
+
+    for index in 1..1000 {
+        let candidate = parent.join(format!("{stem} ({index}).pdf"));
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+
+    Err("Could not find a free output file name".into())
 }
 
 #[tauri::command]

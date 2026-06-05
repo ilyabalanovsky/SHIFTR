@@ -52,7 +52,7 @@ button:disabled {
 .top-nav {
   grid-area: top;
   display: grid;
-  grid-template-columns: 260px minmax(280px, 400px) 260px;
+  grid-template-columns: 210px auto minmax(280px, 400px) 210px;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
@@ -113,6 +113,35 @@ button:disabled {
   display: flex;
   justify-content: flex-end;
   gap: 16px;
+}
+
+.mode-switch {
+  display: inline-flex;
+  width: max-content;
+  gap: 4px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.mode-switch button {
+  display: inline-flex;
+  min-height: 34px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 7px;
+  padding: 0 12px;
+  color: #b9cbbd;
+  background: transparent;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.mode-switch button.active {
+  color: #002111;
+  background: #53ffab;
 }
 
 .nav-icon,
@@ -276,10 +305,12 @@ p {
 }
 
 .empty-state {
-  display: grid;
+  display: flex;
   min-height: 280px;
-  place-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
   border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 12px;
   color: #b9cbbd;
@@ -803,6 +834,10 @@ input:focus {
   width: min(560px, calc(100vw - 48px));
 }
 
+.document-modal {
+  width: min(620px, calc(100vw - 48px));
+}
+
 .modal-head,
 .modal-footer {
   display: flex;
@@ -1002,6 +1037,26 @@ input:focus {
   font-size: 12px;
 }
 
+.capability-warning,
+.capability-summary {
+  border: 1px solid rgba(255, 206, 146, 0.24);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #ffce92;
+  background: rgba(255, 206, 146, 0.07);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.capability-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-color: rgba(20, 209, 255, 0.2);
+  color: #b9cbbd;
+  background: rgba(20, 209, 255, 0.055);
+}
+
 .settings-modal .modal-footer .start-processing {
   width: auto;
   min-width: 96px;
@@ -1039,11 +1094,20 @@ input:focus {
   }
 
   .top-nav {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: 1fr auto auto;
   }
 
   .search-box {
     display: none;
+  }
+
+  .mode-switch button {
+    width: 36px;
+    padding: 0;
+  }
+
+  .mode-switch button {
+    font-size: 0;
   }
 
   .control-panel {

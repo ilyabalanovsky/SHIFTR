@@ -12,6 +12,7 @@ import {
   CloudUpload,
   Cpu,
   FileAudio,
+  FileText,
   FileImage,
   FileVideo,
   FolderOpen,
@@ -26,10 +27,12 @@ import {
 } from 'lucide-react'
 import './App.css'
 
-type FileCategory = 'video' | 'audio' | 'image' | 'unsupported'
+type FileCategory = 'video' | 'audio' | 'image' | 'document' | 'unsupported'
 type JobStatus = 'queued' | 'running' | 'done' | 'failed' | 'canceled'
 type QualityMode = 'fastRemux' | 'fastEncode' | 'smallSize' | 'balanced' | 'highQuality' | 'keepSource'
 type OverwritePolicy = 'rename' | 'overwrite'
+type AppMode = 'media' | 'documents'
+type DocumentOperation = 'imagesToPdf' | 'mergePdfs'
 
 type ConversionPreset = {
   name: string
@@ -52,12 +55,14 @@ type AdvancedOptions = {
 type ConversionJob = {
   id: string
   inputPath: string
+  inputPaths: string[]
   outputPath: string
   sourceFormat: string
   targetFormat: string
   category: FileCategory
   preset: ConversionPreset
   advancedOptions?: AdvancedOptions | null
+  documentOperation?: DocumentOperation | null
   status: JobStatus
   progress: number
   speed?: string | null
@@ -69,8 +74,35 @@ type SupportedFormats = {
   video: string[]
   audio: string[]
   image: string[]
+  document: string[]
   presets: ConversionPreset[]
   defaultParallelism: number
+}
+
+type CodecOption = {
+  id: string
+  label: string
+  available: boolean
+  hardware: boolean
+}
+
+type FormatCodecMatrix = {
+  targetFormat: string
+  videoCodecs: CodecOption[]
+  audioCodecs: CodecOption[]
+  supportsVideo: boolean
+  supportsAudio: boolean
+  supportsRemux: boolean
+}
+
+type ConversionCapabilities = {
+  ffmpegAvailable: boolean
+  ffmpegPath?: string | null
+  hardwareAccels: string[]
+  videoEncoders: CodecOption[]
+  audioEncoders: CodecOption[]
+  matrix: FormatCodecMatrix[]
+  warnings: string[]
 }
 
 type QueueUpdate = {
@@ -78,12 +110,21 @@ type QueueUpdate = {
 }
 
 type BatchGroup = {
-  category: Exclude<FileCategory, 'unsupported'>
+  category: MediaCategory
   paths: string[]
   targetFormat: string
   presetName: string
   advancedOpen: boolean
   advancedOptions: AdvancedOptions | null
+}
+
+type MediaCategory = Exclude<FileCategory, 'document' | 'unsupported'>
+
+type DocumentSetup = {
+  paths: string[]
+  operation: DocumentOperation
+  outputDir: string
+  outputName: string
 }
 
 type CreateJobGroup = {
@@ -109,6 +150,7 @@ const fallbackFormats: SupportedFormats = {
   video: ['mp4', 'mkv', 'mov', 'webm', 'avi'],
   audio: ['mp3', 'aac', 'm4a', 'ogg', 'opus', 'wav', 'flac'],
   image: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'],
+  document: ['pdf'],
   presets: [
     {
       name: 'Fast remux',
@@ -145,7 +187,17 @@ const fallbackFormats: SupportedFormats = {
   defaultParallelism: 2,
 }
 
-const defaultTargets: Record<Exclude<FileCategory, 'unsupported'>, string> = {
+const fallbackCapabilities: ConversionCapabilities = {
+  ffmpegAvailable: false,
+  ffmpegPath: null,
+  hardwareAccels: [],
+  videoEncoders: [],
+  audioEncoders: [],
+  matrix: [],
+  warnings: ['FFmpeg capability detection has not run yet.'],
+}
+
+const defaultTargets: Record<MediaCategory, string> = {
   video: 'webm',
   audio: 'flac',
   image: 'webp',
@@ -156,7 +208,9 @@ const maxWidths = ['Original', '720', '1280', '1920', '3840']
 const qualityLevels = ['20', '40', '60', '80', '95']
 
 function App() {
+  const [activeMode, setActiveMode] = useState<AppMode>('media')
   const [formats, setFormats] = useState<SupportedFormats>(fallbackFormats)
+  const [capabilities, setCapabilities] = useState<ConversionCapabilities>(fallbackCapabilities)
   const [jobs, setJobs] = useState<ConversionJob[]>([])
   const [targetFormat, setTargetFormat] = useState('mp4')
   const [presetName, setPresetName] = useState('Balanced')
@@ -172,6 +226,7 @@ function App() {
   const [activeGroupIndex, setActiveGroupIndex] = useState(0)
   const [completedGroupIndexes, setCompletedGroupIndexes] = useState<number[]>([])
   const [batchOutputDir, setBatchOutputDir] = useState('')
+  const [documentSetup, setDocumentSetup] = useState<DocumentSetup | null>(null)
 
   const selectedPreset = useMemo(
     () => formats.presets.find((preset) => preset.name === presetName) ?? formats.presets[0] ?? fallbackPreset,
@@ -188,11 +243,13 @@ function App() {
 
   const activeGroup = batchGroups[activeGroupIndex]
   const isBatchModalOpen = batchGroups.length > 0
+  const isDocumentModalOpen = documentSetup !== null
 
   const queueOptions = useCallback(() => ({
     outputDir: outputDir || null,
     targetFormat,
     preset: selectedPreset,
+    advancedOptions: null,
     parallelism,
     ffmpegPath: ffmpegPath || null,
   }), [ffmpegPath, outputDir, parallelism, selectedPreset, targetFormat])
@@ -216,6 +273,12 @@ function App() {
     }
   }, [])
 
+  useEffect(() => {
+    invoke<ConversionCapabilities>('get_conversion_capabilities', { ffmpegPath: ffmpegPath || null })
+      .then(setCapabilities)
+      .catch((error) => setCapabilities({ ...fallbackCapabilities, warnings: [String(error)] }))
+  }, [ffmpegPath])
+
   const categoryForPath = useCallback((path: string): FileCategory => {
     const ext = path.split('.').pop()?.toLowerCase() ?? ''
     if (formats.video.includes(ext)) return 'video'
@@ -224,7 +287,7 @@ function App() {
     return 'unsupported'
   }, [formats.audio, formats.image, formats.video])
 
-  const preferredTarget = useCallback((category: Exclude<FileCategory, 'unsupported'>) => {
+  const preferredTarget = useCallback((category: MediaCategory) => {
     const options = formats[category]
     return options.includes(defaultTargets[category]) ? defaultTargets[category] : options[0]
   }, [formats])
@@ -234,7 +297,7 @@ function App() {
   }, [formats.presets])
 
   const buildBatchGroups = useCallback((paths: string[]): BatchGroup[] => {
-    const buckets: Record<Exclude<FileCategory, 'unsupported'>, string[]> = {
+    const buckets: Record<MediaCategory, string[]> = {
       video: [],
       audio: [],
       image: [],
@@ -242,7 +305,7 @@ function App() {
 
     for (const path of paths) {
       const category = categoryForPath(path)
-      if (category !== 'unsupported') {
+      if (category !== 'unsupported' && category !== 'document') {
         buckets[category].push(path)
       }
     }
@@ -259,7 +322,7 @@ function App() {
       }))
   }, [categoryForPath, preferredTarget, presetName])
 
-  const addPaths = useCallback(async (paths: string[]) => {
+  const addMediaPaths = useCallback(async (paths: string[]) => {
     if (!paths.length) return
     setLastError(null)
 
@@ -275,6 +338,35 @@ function App() {
     setCompletedGroupIndexes([])
     setBatchOutputDir(outputDir)
   }, [buildBatchGroups, outputDir])
+
+  const addDocumentPaths = useCallback(async (paths: string[]) => {
+    if (!paths.length) return
+    setLastError(null)
+
+    const supported = paths.filter((path) => isDocumentInput(path, formats))
+    const unsupportedCount = paths.length - supported.length
+    if (unsupportedCount > 0) {
+      setLastError(`${unsupportedCount} unsupported document input${unsupportedCount === 1 ? '' : 's'} skipped.`)
+    }
+    if (!supported.length) return
+
+    const hasImages = supported.some((path) => isImagePath(path, formats))
+    const operation: DocumentOperation = hasImages ? 'imagesToPdf' : 'mergePdfs'
+    setDocumentSetup({
+      paths: supported,
+      operation,
+      outputDir,
+      outputName: operation === 'imagesToPdf' ? 'images.pdf' : 'merged.pdf',
+    })
+  }, [formats, outputDir])
+
+  const addPaths = useCallback(async (paths: string[]) => {
+    if (activeMode === 'documents') {
+      await addDocumentPaths(paths)
+    } else {
+      await addMediaPaths(paths)
+    }
+  }, [activeMode, addDocumentPaths, addMediaPaths])
 
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
@@ -300,8 +392,10 @@ function App() {
       multiple: true,
       filters: [
         {
-          name: 'Media and images',
-          extensions: [...formats.video, ...formats.audio, ...formats.image],
+          name: activeMode === 'documents' ? 'Images and PDFs' : 'Media and images',
+          extensions: activeMode === 'documents'
+            ? [...formats.image, ...formats.document]
+            : [...formats.video, ...formats.audio, ...formats.image],
         },
       ],
     })
@@ -320,6 +414,13 @@ function App() {
     const selected = await open({ directory: true, multiple: false })
     if (typeof selected === 'string') {
       setBatchOutputDir(selected)
+    }
+  }
+
+  async function chooseDocumentOutputDir() {
+    const selected = await open({ directory: true, multiple: false })
+    if (typeof selected === 'string') {
+      setDocumentSetup((current) => current ? { ...current, outputDir: selected } : current)
     }
   }
 
@@ -355,6 +456,32 @@ function App() {
     }
   }
 
+  async function confirmDocumentSetup() {
+    if (!documentSetup) return
+    const paths = relevantDocumentPaths(documentSetup, formats)
+    if (!paths.length) {
+      setLastError(documentSetup.operation === 'imagesToPdf' ? 'Add at least one image.' : 'Add at least one PDF.')
+      return
+    }
+
+    try {
+      const created = await invoke<ConversionJob[]>('create_document_job', {
+        options: {
+          paths,
+          outputDir: documentSetup.outputDir || null,
+          outputName: documentSetup.outputName || null,
+          operation: documentSetup.operation,
+          parallelism,
+        },
+      })
+      setJobs(created)
+      setOutputDir(documentSetup.outputDir)
+      setDocumentSetup(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
   function closeBatchModal() {
     setBatchGroups([])
     setActiveGroupIndex(0)
@@ -384,18 +511,18 @@ function App() {
     if (group.category === 'audio') {
       return {
         copyStreams: options.copyStreams,
-        audioCodec: allowedAudioCodecs(group.targetFormat)[0],
-        audioBitrate: allowedAudioCodecs(group.targetFormat)[0] === 'flac' || allowedAudioCodecs(group.targetFormat)[0] === 'pcm_s16le'
+        audioCodec: allowedAudioCodecs(group.targetFormat, capabilities)[0]?.id,
+        audioBitrate: losslessAudioOnly(group.targetFormat, capabilities) 
           ? null
           : allowedBitrate(options.audioBitrate),
       }
     }
     return {
       copyStreams: options.copyStreams,
-      videoCodec: allowedVideoCodecs(group.targetFormat)[0],
-      audioCodec: allowedAudioCodecs(group.targetFormat)[0],
+      videoCodec: allowedVideoCodecs(group.targetFormat, capabilities)[0]?.id,
+      audioCodec: allowedAudioCodecs(group.targetFormat, capabilities)[0]?.id,
       videoQuality: clampQuality(options.videoQuality ?? 60),
-      audioBitrate: allowedAudioCodecs(group.targetFormat)[0] === 'flac' || allowedAudioCodecs(group.targetFormat)[0] === 'pcm_s16le'
+      audioBitrate: losslessAudioOnly(group.targetFormat, capabilities)
         ? null
         : allowedBitrate(options.audioBitrate),
       maxWidth: allowedMaxWidth(options.maxWidth),
@@ -405,8 +532,8 @@ function App() {
   function ensureAdvancedOptions(group: BatchGroup): AdvancedOptions {
     return group.advancedOptions ?? {
       copyStreams: false,
-      videoCodec: allowedVideoCodecs(group.targetFormat)[0],
-      audioCodec: allowedAudioCodecs(group.targetFormat)[0],
+      videoCodec: allowedVideoCodecs(group.targetFormat, capabilities)[0]?.id,
+      audioCodec: allowedAudioCodecs(group.targetFormat, capabilities)[0]?.id,
       videoQuality: 60,
       audioBitrate: '192k',
       maxWidth: null,
@@ -425,9 +552,9 @@ function App() {
     const current = group.advancedOptions
     return {
       ...current,
-      videoCodec: allowedVideoCodecs(targetFormat)[0],
-      audioCodec: allowedAudioCodecs(targetFormat)[0],
-      audioBitrate: losslessAudioOnly(targetFormat) ? null : allowedBitrate(current.audioBitrate),
+      videoCodec: allowedVideoCodecs(targetFormat, capabilities)[0]?.id,
+      audioCodec: allowedAudioCodecs(targetFormat, capabilities)[0]?.id,
+      audioBitrate: losslessAudioOnly(targetFormat, capabilities) ? null : allowedBitrate(current.audioBitrate),
     }
   }
 
@@ -480,6 +607,25 @@ function App() {
           <span>SHIFTR</span>
         </div>
 
+        <div className="mode-switch" role="tablist" aria-label="Conversion mode">
+          <button
+            className={activeMode === 'media' ? 'active' : ''}
+            onClick={() => setActiveMode('media')}
+            role="tab"
+            type="button"
+          >
+            <FileVideo size={16} /> Media
+          </button>
+          <button
+            className={activeMode === 'documents' ? 'active' : ''}
+            onClick={() => setActiveMode('documents')}
+            role="tab"
+            type="button"
+          >
+            <FileText size={16} /> Documents
+          </button>
+        </div>
+
         <div className="search-box">
           <Search size={18} />
           <input placeholder="Search files or presets..." aria-label="Search files or presets" />
@@ -518,8 +664,8 @@ function App() {
             <CloudUpload size={24} />
           </div>
           <div className="drop-copy">
-            <strong>Drag & Drop media here</strong>
-            <span>or click to browse local files</span>
+            <strong>{activeMode === 'documents' ? 'Drag & Drop images or PDFs here' : 'Drag & Drop media here'}</strong>
+            <span>{activeMode === 'documents' ? 'create PDFs or merge existing documents' : 'or click to browse local files'}</span>
           </div>
         </div>
 
@@ -551,7 +697,7 @@ function App() {
                 <div className="job-icon">{iconFor(job.category)}</div>
                 <div className="job-main">
                   <div className="job-title">
-                    <strong>{fileName(job.inputPath)}</strong>
+                    <strong>{jobTitle(job)}</strong>
                     <span>{Math.round(job.progress * 100)}%</span>
                   </div>
                   <div className="job-progress-line">
@@ -729,8 +875,8 @@ function App() {
                           <label>
                             Video codec
                             <CustomSelect
-                              value={allowedVideoCodecs(activeGroup.targetFormat)[0]}
-                              options={allowedVideoCodecs(activeGroup.targetFormat).map((codec) => ({ value: codec, label: codec }))}
+                              value={allowedVideoCodecs(activeGroup.targetFormat, capabilities)[0]?.id ?? ''}
+                              options={allowedVideoCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
                               onChange={(value) => updateAdvancedOptions({ videoCodec: value })}
                             />
                           </label>
@@ -757,12 +903,12 @@ function App() {
                           <label>
                             Audio codec
                             <CustomSelect
-                              value={allowedAudioCodecs(activeGroup.targetFormat)[0]}
-                              options={allowedAudioCodecs(activeGroup.targetFormat).map((codec) => ({ value: codec, label: codec }))}
+                              value={allowedAudioCodecs(activeGroup.targetFormat, capabilities)[0]?.id ?? ''}
+                              options={allowedAudioCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
                               onChange={(value) => updateAdvancedOptions({ audioCodec: value })}
                             />
                           </label>
-                          {!losslessAudioOnly(activeGroup.targetFormat) && (
+                          {!losslessAudioOnly(activeGroup.targetFormat, capabilities) && (
                             <label>
                               Audio bitrate
                               <CustomSelect
@@ -825,6 +971,75 @@ function App() {
         </div>
       )}
 
+      {isDocumentModalOpen && documentSetup && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="settings-modal document-modal" role="dialog" aria-modal="true" aria-labelledby="document-title">
+            <header className="modal-head">
+              <div>
+                <p>Document setup</p>
+                <h2 id="document-title">Configure PDF task</h2>
+              </div>
+              <button className="nav-icon" type="button" onClick={() => setDocumentSetup(null)} title="Close document setup">
+                <X size={20} />
+              </button>
+            </header>
+
+            <div className="settings-body">
+              <section className="modal-section">
+                <h3><FileText size={16} /> Operation</h3>
+                <label>
+                  Document task
+                  <CustomSelect
+                    value={documentSetup.operation}
+                    options={[
+                      { value: 'imagesToPdf', label: 'Images to PDF' },
+                      { value: 'mergePdfs', label: 'Merge PDFs' },
+                    ]}
+                    onChange={(value) => setDocumentSetup((current) => current ? {
+                      ...current,
+                      operation: value as DocumentOperation,
+                      outputName: value === 'imagesToPdf' ? 'images.pdf' : 'merged.pdf',
+                    } : current)}
+                  />
+                </label>
+                <p className="preset-description">{documentOperationDescription(documentSetup, formats)}</p>
+                <div className="batch-file-list">
+                  {relevantDocumentPaths(documentSetup, formats).slice(0, 8).map((path) => <span key={path}>{fileName(path)}</span>)}
+                  {irrelevantDocumentCount(documentSetup, formats) > 0 && (
+                    <span>{irrelevantDocumentCount(documentSetup, formats)} file{irrelevantDocumentCount(documentSetup, formats) === 1 ? '' : 's'} ignored for this operation</span>
+                  )}
+                </div>
+              </section>
+
+              <section className="modal-section">
+                <h3><HardDrive size={16} /> Output</h3>
+                <label>
+                  Output file name
+                  <input
+                    value={documentSetup.outputName}
+                    onChange={(event) => setDocumentSetup((current) => current ? { ...current, outputName: event.target.value } : current)}
+                    placeholder="merged.pdf"
+                  />
+                </label>
+                <div className="output-card">
+                  <div>{documentSetup.outputDir || 'Same as first source file'}</div>
+                  <button type="button" onClick={chooseDocumentOutputDir}>
+                    <FolderOpen size={17} /> Browse...
+                  </button>
+                </div>
+              </section>
+            </div>
+
+            <footer className="modal-footer">
+              <span className="settings-note">{relevantDocumentPaths(documentSetup, formats).length} input{relevantDocumentPaths(documentSetup, formats).length === 1 ? '' : 's'} ready</span>
+              <button type="button" className="start-processing" onClick={confirmDocumentSetup}>
+                Add to Queue
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
       {isSettingsOpen && (
         <div className="modal-backdrop" role="presentation">
           <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -841,6 +1056,13 @@ function App() {
             <div className="settings-body">
               <section className="modal-section">
                 <h3><Cpu size={16} /> Engine</h3>
+                {capabilities.warnings.length > 0 && (
+                  <div className="capability-warning">{capabilities.warnings[0]}</div>
+                )}
+                <div className="capability-summary">
+                  <span>{capabilities.ffmpegAvailable ? 'FFmpeg detected' : 'Using fallback matrix'}</span>
+                  <span>{capabilities.hardwareAccels.length ? capabilities.hardwareAccels.join(', ') : 'No hardware acceleration detected'}</span>
+                </div>
                 <label>
                   FFmpeg Path
                   <div className="path-picker">
@@ -876,6 +1098,48 @@ function App() {
 
 function fileName(path: string) {
   return path.split(/[\\/]/).pop() ?? path
+}
+
+function extension(path: string) {
+  return path.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function isImagePath(path: string, formats: SupportedFormats) {
+  return formats.image.includes(extension(path))
+}
+
+function isPdfPath(path: string, formats: SupportedFormats) {
+  return formats.document.includes(extension(path))
+}
+
+function isDocumentInput(path: string, formats: SupportedFormats) {
+  return isImagePath(path, formats) || isPdfPath(path, formats)
+}
+
+function relevantDocumentPaths(setup: DocumentSetup, formats: SupportedFormats) {
+  return setup.operation === 'imagesToPdf'
+    ? setup.paths.filter((path) => isImagePath(path, formats))
+    : setup.paths.filter((path) => isPdfPath(path, formats))
+}
+
+function irrelevantDocumentCount(setup: DocumentSetup, formats: SupportedFormats) {
+  return setup.paths.length - relevantDocumentPaths(setup, formats).length
+}
+
+function documentOperationDescription(setup: DocumentSetup, formats: SupportedFormats) {
+  const activeCount = relevantDocumentPaths(setup, formats).length
+  if (setup.operation === 'imagesToPdf') {
+    return `${activeCount} image${activeCount === 1 ? '' : 's'} will become a single PDF. PDFs in this import stay available if you switch operation.`
+  }
+  return `${activeCount} PDF${activeCount === 1 ? '' : 's'} will be merged in the current order. Images in this import stay available if you switch operation.`
+}
+
+function jobTitle(job: ConversionJob) {
+  if (job.category !== 'document') return fileName(job.inputPath)
+  const count = job.inputPaths?.length ?? 1
+  if (job.documentOperation === 'imagesToPdf') return `Images to PDF · ${count} file${count === 1 ? '' : 's'}`
+  if (job.documentOperation === 'mergePdfs') return `Merged PDF · ${count} file${count === 1 ? '' : 's'}`
+  return fileName(job.inputPath)
 }
 
 function CustomSelect({
@@ -928,11 +1192,12 @@ function CustomSelect({
 function iconFor(category: FileCategory) {
   if (category === 'audio') return <FileAudio size={22} />
   if (category === 'image') return <FileImage size={22} />
+  if (category === 'document') return <FileText size={22} />
   if (category === 'unsupported') return <AlertCircle size={22} />
   return <FileVideo size={22} />
 }
 
-function categoryLabel(category: Exclude<FileCategory, 'unsupported'>) {
+function categoryLabel(category: MediaCategory) {
   const labels = {
     video: 'Video',
     audio: 'Audio',
@@ -941,19 +1206,43 @@ function categoryLabel(category: Exclude<FileCategory, 'unsupported'>) {
   return labels[category]
 }
 
-function allowedVideoCodecs(targetFormat: string) {
-  return targetFormat === 'webm' ? ['libvpx-vp9'] : ['mpeg4']
+function allowedVideoCodecs(targetFormat: string, capabilities: ConversionCapabilities): CodecOption[] {
+  const matrix = capabilities.matrix.find((item) => item.targetFormat === targetFormat)
+  const codecs = matrix?.videoCodecs.filter((codec) => codec.available) ?? []
+  if (codecs.length > 0) return codecs
+  return fallbackVideoCodecs(targetFormat)
 }
 
-function allowedAudioCodecs(targetFormat: string) {
-  if (targetFormat === 'webm' || targetFormat === 'ogg' || targetFormat === 'opus') return ['libopus']
-  if (targetFormat === 'flac') return ['flac']
-  if (targetFormat === 'wav') return ['pcm_s16le']
-  return ['aac']
+function allowedAudioCodecs(targetFormat: string, capabilities: ConversionCapabilities): CodecOption[] {
+  const matrix = capabilities.matrix.find((item) => item.targetFormat === targetFormat)
+  const codecs = matrix?.audioCodecs.filter((codec) => codec.available) ?? []
+  if (codecs.length > 0) return codecs
+  return fallbackAudioCodecs(targetFormat)
 }
 
-function losslessAudioOnly(targetFormat: string) {
-  return targetFormat === 'flac' || targetFormat === 'wav'
+function fallbackVideoCodecs(targetFormat: string): CodecOption[] {
+  const ids = targetFormat === 'webm' ? ['libvpx-vp9'] : ['mpeg4']
+  return ids.map((id) => ({ id, label: id, available: true, hardware: false }))
+}
+
+function fallbackAudioCodecs(targetFormat: string): CodecOption[] {
+  const ids = targetFormat === 'webm' || targetFormat === 'ogg' || targetFormat === 'opus'
+    ? ['libopus']
+    : targetFormat === 'flac'
+      ? ['flac']
+      : targetFormat === 'wav'
+        ? ['pcm_s16le']
+        : ['aac']
+  return ids.map((id) => ({ id, label: id, available: true, hardware: false }))
+}
+
+function losslessAudioOnly(targetFormat: string, capabilities: ConversionCapabilities) {
+  const codecs = allowedAudioCodecs(targetFormat, capabilities)
+  return codecs.length > 0 && codecs.every((codec) => codec.id === 'flac' || codec.id === 'pcm_s16le')
+}
+
+function codecLabel(codec: CodecOption) {
+  return `${codec.label}${codec.hardware ? ' · GPU' : ''}`
 }
 
 function allowedBitrate(value?: string | null) {

@@ -1,0 +1,241 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-label="SHIFTR blob mascot">
+  <defs>
+    <radialGradient id="blobFill" cx="36%" cy="28%" r="76%">
+      <stop offset="0%" stop-color="#79ff28"/>
+      <stop offset="54%" stop-color="#49d61b"/>
+      <stop offset="100%" stop-color="#2aa90f"/>
+    </radialGradient>
+    <radialGradient id="eyeFill" cx="40%" cy="34%" r="72%">
+      <stop offset="0%" stop-color="#1f271d"/>
+      <stop offset="100%" stop-color="#050704"/>
+    </radialGradient>
+    <filter id="softShadow" x="-30%" y="-30%" width="160%" height="170%">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#000000" flood-opacity="0.34"/>
+    </filter>
+  </defs>
+
+  <style>
+    .mascot {
+      transform-box: fill-box;
+      transform-origin: 50% 56%;
+      animation: mascot-breathe 5.8s ease-in-out infinite;
+    }
+
+    .tendril {
+      fill: url(#blobFill);
+      transform-box: fill-box;
+      transform-origin: center;
+    }
+
+    .tendril-left {
+      transform-origin: 30% 50%;
+      animation: stretch-left 5.6s ease-in-out infinite;
+    }
+
+    .tendril-right {
+      transform-origin: 70% 48%;
+      animation: stretch-right 5.2s ease-in-out 0.25s infinite;
+    }
+
+    .tendril-top-left {
+      transform-origin: 40% 34%;
+      animation: stretch-up-a 5.8s ease-in-out 0.1s infinite;
+    }
+
+    .tendril-top {
+      transform-origin: 51% 34%;
+      animation: stretch-up-b 5.1s ease-in-out 0.45s infinite;
+    }
+
+    .tendril-top-right {
+      transform-origin: 62% 35%;
+      animation: stretch-up-c 5.7s ease-in-out 0.2s infinite;
+    }
+
+    .tendril-bottom-left {
+      transform-origin: 40% 67%;
+      animation: stretch-down-a 5.4s ease-in-out 0.35s infinite;
+    }
+
+    .tendril-bottom {
+      transform-origin: 51% 69%;
+      animation: stretch-down-b 5.9s ease-in-out 0.7s infinite;
+    }
+
+    .tendril-bottom-right {
+      transform-origin: 63% 66%;
+      animation: stretch-down-c 5.3s ease-in-out 0.55s infinite;
+    }
+
+    .eye {
+      fill: url(#eyeFill);
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: eye-squint 5.8s ease-in-out infinite;
+    }
+
+    .eye-shine {
+      fill: #dfffd2;
+      opacity: 0.82;
+      pointer-events: none;
+    }
+
+    .lid {
+      fill: #43cf17;
+      opacity: 0;
+      transform-box: fill-box;
+      transform-origin: center;
+      animation: blink-lid 6.4s ease-in-out infinite;
+    }
+
+    .right-lid {
+      animation-delay: 0.035s;
+    }
+
+    @keyframes mascot-breathe {
+      0%, 100% { transform: translateY(0) scale(1); }
+      48% { transform: translateY(-6px) scale(1.018, 0.988); }
+      72% { transform: translateY(-2px) scale(0.992, 1.006); }
+    }
+
+    @keyframes stretch-left {
+      0%, 100% { transform: translateX(0) scaleX(1) scaleY(1); }
+      48% { transform: translateX(-10px) scaleX(1.18) scaleY(0.94); }
+      74% { transform: translateX(-3px) scaleX(0.97) scaleY(1.03); }
+    }
+
+    @keyframes stretch-right {
+      0%, 100% { transform: translateX(0) scaleX(1) scaleY(1); }
+      45% { transform: translateX(12px) scaleX(1.2) scaleY(0.93); }
+      73% { transform: translateX(4px) scaleX(0.98) scaleY(1.04); }
+    }
+
+    @keyframes stretch-up-a {
+      0%, 100% { transform: translateY(0) rotate(-5deg) scaleY(1) scaleX(1); }
+      48% { transform: translateY(-12px) rotate(-7deg) scaleY(1.18) scaleX(0.94); }
+      76% { transform: translateY(-3px) rotate(-4deg) scaleY(0.98) scaleX(1.03); }
+    }
+
+    @keyframes stretch-up-b {
+      0%, 100% { transform: translateY(0) scaleY(1) scaleX(1); }
+      44% { transform: translateY(-14px) scaleY(1.22) scaleX(0.92); }
+      72% { transform: translateY(-4px) scaleY(0.97) scaleX(1.04); }
+    }
+
+    @keyframes stretch-up-c {
+      0%, 100% { transform: translateY(0) rotate(5deg) scaleY(1) scaleX(1); }
+      47% { transform: translateY(-12px) rotate(7deg) scaleY(1.17) scaleX(0.94); }
+      74% { transform: translateY(-3px) rotate(4deg) scaleY(0.98) scaleX(1.03); }
+    }
+
+    @keyframes stretch-down-a {
+      0%, 100% { transform: translateY(0) rotate(5deg) scaleY(1) scaleX(1); }
+      50% { transform: translateY(11px) rotate(8deg) scaleY(1.18) scaleX(0.94); }
+      76% { transform: translateY(3px) rotate(3deg) scaleY(0.98) scaleX(1.03); }
+    }
+
+    @keyframes stretch-down-b {
+      0%, 100% { transform: translateY(0) scaleY(1) scaleX(1); }
+      48% { transform: translateY(14px) scaleY(1.22) scaleX(0.92); }
+      76% { transform: translateY(4px) scaleY(0.97) scaleX(1.04); }
+    }
+
+    @keyframes stretch-down-c {
+      0%, 100% { transform: translateY(0) rotate(-6deg) scaleY(1) scaleX(1); }
+      46% { transform: translateY(11px) rotate(-8deg) scaleY(1.17) scaleX(0.94); }
+      72% { transform: translateY(3px) rotate(-4deg) scaleY(0.98) scaleX(1.03); }
+    }
+
+    @keyframes eye-squint {
+      0%, 100% { transform: scaleY(1); }
+      48% { transform: scaleY(0.96); }
+      72% { transform: scaleY(1.02); }
+    }
+
+    @keyframes blink-lid {
+      0%, 39%, 43.6%, 100% { opacity: 0; transform: scaleY(0.05); }
+      40.4%, 42% { opacity: 1; transform: scaleY(1); }
+      43% { opacity: 0.78; transform: scaleY(0.34); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .mascot,
+      .tendril,
+      .eye,
+      .lid {
+        animation: none;
+      }
+    }
+  </style>
+
+  <g filter="url(#softShadow)">
+    <g class="mascot">
+      <path class="tendril tendril-left" d="M119 211 C93 192 42 178 33 207 C23 239 77 260 124 244 C151 235 142 227 119 211 Z"/>
+      <path class="tendril tendril-left" d="M126 298 C93 294 42 310 46 340 C50 371 105 363 145 324 C166 304 153 301 126 298 Z"/>
+      <path class="tendril tendril-right" d="M394 204 C424 174 470 174 477 205 C484 236 432 249 392 232 C368 222 375 222 394 204 Z"/>
+      <path class="tendril tendril-right" d="M395 287 C436 272 487 287 485 318 C483 350 427 349 391 317 C371 299 371 296 395 287 Z"/>
+      <path class="tendril tendril-top-left" d="M177 152 C152 123 153 87 180 83 C212 78 235 125 215 159 C204 178 194 173 177 152 Z"/>
+      <path class="tendril tendril-top" d="M247 151 C236 115 242 66 258 64 C276 62 284 115 269 151 C260 173 254 173 247 151 Z"/>
+      <path class="tendril tendril-top-right" d="M317 157 C307 123 326 79 354 83 C385 88 380 131 347 160 C329 176 323 176 317 157 Z"/>
+      <path class="tendril tendril-bottom-left" d="M181 355 C157 385 169 431 197 429 C225 427 231 377 211 352 C199 337 192 341 181 355 Z"/>
+      <path class="tendril tendril-bottom" d="M250 369 C235 407 244 462 274 464 C305 466 317 410 295 370 C281 346 259 346 250 369 Z"/>
+      <path class="tendril tendril-bottom-right" d="M330 352 C360 369 386 424 414 408 C443 390 404 342 361 330 C331 322 310 341 330 352 Z"/>
+
+      <path
+        fill="url(#blobFill)"
+        d="M104 205
+           C91 185 103 160 129 157
+           C158 153 177 181 198 181
+           C221 181 216 145 240 140
+           C262 135 259 174 278 176
+           C302 178 300 139 327 140
+           C351 141 348 180 368 184
+           C390 189 408 169 426 187
+           C445 207 418 232 430 252
+           C442 271 477 266 484 290
+           C491 315 453 329 423 318
+           C400 310 391 325 407 343
+           C425 364 421 391 397 396
+           C369 402 346 365 320 357
+           C296 350 288 374 264 374
+           C240 375 233 350 209 356
+           C179 364 167 400 140 391
+           C114 382 117 349 140 326
+           C157 310 145 293 119 299
+           C88 306 50 294 53 269
+           C56 244 98 242 115 226
+           C121 221 113 215 104 205 Z"
+      />
+
+      <path
+        fill="#33bd13"
+        opacity="0.72"
+        d="M115 199
+           C100 181 111 166 133 165
+           C161 163 178 191 202 190
+           C226 189 225 158 245 153
+           C267 147 268 182 286 185
+           C310 188 312 153 332 154
+           C351 155 353 185 369 193
+           C389 203 414 194 423 207
+           C394 209 374 224 363 245
+           C334 219 298 210 262 219
+           C226 228 201 203 164 211
+           C143 216 128 212 115 199 Z"
+      />
+
+      <g class="face">
+        <ellipse class="eye" cx="211" cy="246" rx="36" ry="42"/>
+        <ellipse class="eye" cx="297" cy="246" rx="36" ry="42"/>
+
+        <circle class="eye-shine" cx="197" cy="231" r="8"/>
+        <circle class="eye-shine" cx="214" cy="245" r="4"/>
+        <circle class="eye-shine" cx="283" cy="231" r="8"/>
+        <circle class="eye-shine" cx="300" cy="245" r="4"/>
+
+        <ellipse class="lid left-lid" cx="211" cy="246" rx="38" ry="44"/>
+        <ellipse class="lid right-lid" cx="297" cy="246" rx="38" ry="44"/>
+      </g>
+    </g>
+  </g>
+</svg>

@@ -1,4 +1,6 @@
 mod commands;
+mod capabilities;
+mod documents;
 mod engines;
 mod models;
 mod queue;
@@ -13,9 +15,11 @@ fn main() {
         .manage(Arc::new(QueueState::default()))
         .invoke_handler(tauri::generate_handler![
             commands::get_supported_formats,
+            commands::get_conversion_capabilities,
             commands::probe_file,
             commands::create_jobs,
             commands::create_jobs_batch,
+            commands::create_document_job,
             commands::update_queued_jobs,
             commands::start_queue,
             commands::pause_queue,

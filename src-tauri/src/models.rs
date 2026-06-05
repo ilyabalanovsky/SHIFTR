@@ -7,6 +7,7 @@ pub enum FileCategory {
     Video,
     Audio,
     Image,
+    Document,
     Unsupported,
 }
 
@@ -52,17 +53,26 @@ pub struct ConversionPreset {
 pub struct ConversionJob {
     pub id: String,
     pub input_path: String,
+    pub input_paths: Vec<String>,
     pub output_path: String,
     pub source_format: String,
     pub target_format: String,
     pub category: FileCategory,
     pub preset: ConversionPreset,
     pub advanced_options: Option<AdvancedOptions>,
+    pub document_operation: Option<DocumentOperation>,
     pub status: JobStatus,
     pub progress: f32,
     pub speed: Option<String>,
     pub eta_seconds: Option<u64>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum DocumentOperation {
+    ImagesToPdf,
+    MergePdfs,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,8 +106,41 @@ pub struct SupportedFormats {
     pub video: Vec<String>,
     pub audio: Vec<String>,
     pub image: Vec<String>,
+    pub document: Vec<String>,
     pub presets: Vec<ConversionPreset>,
     pub default_parallelism: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodecOption {
+    pub id: String,
+    pub label: String,
+    pub available: bool,
+    pub hardware: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FormatCodecMatrix {
+    pub target_format: String,
+    pub video_codecs: Vec<CodecOption>,
+    pub audio_codecs: Vec<CodecOption>,
+    pub supports_video: bool,
+    pub supports_audio: bool,
+    pub supports_remux: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversionCapabilities {
+    pub ffmpeg_available: bool,
+    pub ffmpeg_path: Option<String>,
+    pub hardware_accels: Vec<String>,
+    pub video_encoders: Vec<CodecOption>,
+    pub audio_encoders: Vec<CodecOption>,
+    pub matrix: Vec<FormatCodecMatrix>,
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,6 +163,16 @@ pub struct CreateJobGroup {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DocumentJobOptions {
+    pub paths: Vec<String>,
+    pub output_dir: Option<String>,
+    pub output_name: Option<String>,
+    pub operation: DocumentOperation,
+    pub parallelism: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueUpdate {
     pub job: ConversionJob,
 }
@@ -127,6 +180,7 @@ pub struct QueueUpdate {
 pub const VIDEO_FORMATS: &[&str] = &["mp4", "mkv", "mov", "webm", "avi"];
 pub const AUDIO_FORMATS: &[&str] = &["mp3", "aac", "m4a", "ogg", "opus", "wav", "flac"];
 pub const IMAGE_FORMATS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff"];
+pub const DOCUMENT_FORMATS: &[&str] = &["pdf"];
 
 pub fn category_for_extension(ext: &str) -> FileCategory {
     let ext = ext.trim_start_matches('.').to_ascii_lowercase();
@@ -136,6 +190,8 @@ pub fn category_for_extension(ext: &str) -> FileCategory {
         FileCategory::Audio
     } else if IMAGE_FORMATS.contains(&ext.as_str()) {
         FileCategory::Image
+    } else if DOCUMENT_FORMATS.contains(&ext.as_str()) {
+        FileCategory::Document
     } else {
         FileCategory::Unsupported
     }
@@ -199,6 +255,7 @@ mod tests {
         assert_eq!(category_for_extension("mp4"), FileCategory::Video);
         assert_eq!(category_for_extension(".flac"), FileCategory::Audio);
         assert_eq!(category_for_extension("webp"), FileCategory::Image);
-        assert_eq!(category_for_extension("pdf"), FileCategory::Unsupported);
+        assert_eq!(category_for_extension("pdf"), FileCategory::Document);
+        assert_eq!(category_for_extension("zip"), FileCategory::Unsupported);
     }
 }

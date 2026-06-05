@@ -1,4 +1,8 @@
-use crate::models::{AdvancedOptions, ConversionJob, FileCategory, JobStatus, OverwritePolicy, QualityMode};
+use crate::{
+    capabilities::{allowed_audio_codec_for_format, allowed_video_codec_for_format},
+    documents,
+    models::{AdvancedOptions, ConversionJob, FileCategory, JobStatus, OverwritePolicy, QualityMode},
+};
 use anyhow::{anyhow, Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -47,6 +51,7 @@ pub async fn convert_job(
     let result = match job.category {
         FileCategory::Video | FileCategory::Audio => run_ffmpeg(&app, &mut job, ffmpeg_path, cancel.clone()).await,
         FileCategory::Image => run_image(&mut job, cancel.clone()).await,
+        FileCategory::Document => run_document(&mut job, cancel.clone()).await,
         FileCategory::Unsupported => Err(anyhow!("Unsupported source format: {}", job.source_format)),
     };
 
@@ -65,6 +70,15 @@ pub async fn convert_job(
 
     emit_job(&app, &job);
     job
+}
+
+async fn run_document(job: &mut ConversionJob, cancel: Arc<AtomicBool>) -> Result<()> {
+    if cancel.load(Ordering::Relaxed) {
+        return Ok(());
+    }
+    let job = job.clone();
+    tokio::task::spawn_blocking(move || documents::run_document_job(&job)).await??;
+    Ok(())
 }
 
 pub fn build_ffmpeg_args(job: &ConversionJob) -> Vec<String> {
@@ -220,22 +234,11 @@ fn advanced_audio_args(job: &ConversionJob, options: &AdvancedOptions) -> Vec<&'
 }
 
 fn allowed_video_codec(job: &ConversionJob, requested: Option<&str>) -> &'static str {
-    let allowed: &[&str] = if job.target_format == "webm" {
-        &["libvpx-vp9"]
-    } else {
-        &["mpeg4"]
-    };
-    requested.and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec)).unwrap_or(allowed[0])
+    allowed_video_codec_for_format(&job.target_format, requested)
 }
 
 fn allowed_audio_codec(job: &ConversionJob, requested: Option<&str>) -> &'static str {
-    let allowed: &[&str] = match job.target_format.as_str() {
-        "webm" | "opus" | "ogg" => &["libopus"],
-        "flac" => &["flac"],
-        "wav" => &["pcm_s16le"],
-        _ => &["aac"],
-    };
-    requested.and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec)).unwrap_or(allowed[0])
+    allowed_audio_codec_for_format(&job.target_format, requested)
 }
 
 fn allowed_bitrate(requested: Option<&str>) -> Option<&'static str> {
@@ -453,6 +456,7 @@ mod tests {
         ConversionJob {
             id: "1".into(),
             input_path: "input.mp4".into(),
+            input_paths: vec!["input.mp4".into()],
             output_path: "output.webm".into(),
             source_format: "mp4".into(),
             target_format: "webm".into(),
@@ -464,6 +468,7 @@ mod tests {
                 overwrite_policy: OverwritePolicy::Rename,
             },
             advanced_options: None,
+            document_operation: None,
             status: JobStatus::Queued,
             progress: 0.0,
             speed: None,

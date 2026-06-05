@@ -1,4 +1,4 @@
-use crate::models::{ConversionJob, FileCategory, JobStatus, OverwritePolicy, QualityMode};
+use crate::models::{AdvancedOptions, ConversionJob, FileCategory, JobStatus, OverwritePolicy, QualityMode};
 use anyhow::{anyhow, Context, Result};
 use std::{
     path::{Path, PathBuf},
@@ -54,6 +54,7 @@ pub async fn convert_job(
         job.status = JobStatus::Canceled;
         job.error = None;
     } else if let Err(error) = result {
+        remove_failed_output(&job);
         job.status = JobStatus::Failed;
         job.error = Some(human_error(&error.to_string()));
     } else {
@@ -74,37 +75,9 @@ pub fn build_ffmpeg_args(job: &ConversionJob) -> Vec<String> {
         job.input_path.clone(),
     ];
 
-    match (&job.category, &job.preset.quality_mode, job.target_format.as_str()) {
-        (FileCategory::Video, QualityMode::SmallSize, _) => {
-            args.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "36", "-c:a", "libopus"].map(String::from));
-        }
-        (FileCategory::Video, QualityMode::HighQuality, "webm") => {
-            args.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "24", "-c:a", "libopus"].map(String::from));
-        }
-        (FileCategory::Video, QualityMode::HighQuality, _) => {
-            args.extend(["-c:v", "mpeg4", "-q:v", "2", "-c:a", "aac", "-b:a", "256k"].map(String::from));
-        }
-        (FileCategory::Video, QualityMode::KeepSource, _) => {
-            args.extend(["-c", "copy"].map(String::from));
-        }
-        (FileCategory::Video, _, "webm") => {
-            args.extend(["-c:v", "libvpx-vp9", "-b:v", "0", "-crf", "30", "-c:a", "libopus"].map(String::from));
-        }
-        (FileCategory::Video, _, _) => {
-            args.extend(["-c:v", "mpeg4", "-q:v", "5", "-c:a", "aac", "-b:a", "192k"].map(String::from));
-        }
-        (FileCategory::Audio, QualityMode::SmallSize, _) => {
-            args.extend(["-vn", "-b:a", "96k"].map(String::from));
-        }
-        (FileCategory::Audio, QualityMode::HighQuality, _) => {
-            args.extend(["-vn", "-b:a", "320k"].map(String::from));
-        }
-        (FileCategory::Audio, QualityMode::KeepSource, _) => {
-            args.extend(["-vn", "-c:a", "copy"].map(String::from));
-        }
-        (FileCategory::Audio, _, _) => {
-            args.extend(["-vn", "-b:a", "192k"].map(String::from));
-        }
+    match job.category {
+        FileCategory::Video => args.extend(video_args(job).into_iter().map(String::from)),
+        FileCategory::Audio => args.extend(audio_args(job).into_iter().map(String::from)),
         _ => {}
     }
 
@@ -115,6 +88,213 @@ pub fn build_ffmpeg_args(job: &ConversionJob) -> Vec<String> {
         job.output_path.clone(),
     ]);
     args
+}
+
+fn video_args(job: &ConversionJob) -> Vec<&'static str> {
+    if let Some(options) = &job.advanced_options {
+        return advanced_video_args(job, options);
+    }
+
+    match (&job.preset.quality_mode, job.target_format.as_str()) {
+        (QualityMode::FastRemux | QualityMode::KeepSource, _) => vec![
+            "-map", "0",
+            "-c", "copy",
+            "-movflags", "+faststart",
+        ],
+        (QualityMode::FastEncode, "webm") => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8", "-b:v", "0", "-crf", "34",
+            "-c:a", "libopus", "-b:a", "128k",
+        ],
+        (QualityMode::FastEncode, _) => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "mpeg4", "-q:v", "7",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart",
+        ],
+        (QualityMode::SmallSize, "webm") => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "4", "-b:v", "0", "-crf", "38",
+            "-vf", "scale='min(1280,iw)':-2",
+            "-c:a", "libopus", "-b:a", "96k",
+        ],
+        (QualityMode::SmallSize, _) => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "mpeg4", "-q:v", "8",
+            "-vf", "scale='min(1280,iw)':-2",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart",
+        ],
+        (QualityMode::HighQuality, "webm") => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "2", "-b:v", "0", "-crf", "24",
+            "-c:a", "libopus", "-b:a", "192k",
+        ],
+        (QualityMode::HighQuality, _) => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "mpeg4", "-q:v", "2",
+            "-c:a", "aac", "-b:a", "256k",
+            "-movflags", "+faststart",
+        ],
+        (QualityMode::Balanced, "webm") => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "libvpx-vp9", "-deadline", "good", "-cpu-used", "5", "-b:v", "0", "-crf", "30",
+            "-c:a", "libopus", "-b:a", "160k",
+        ],
+        (QualityMode::Balanced, _) => vec![
+            "-map", "0:v:0?", "-map", "0:a:0?",
+            "-c:v", "mpeg4", "-q:v", "5",
+            "-c:a", "aac", "-b:a", "192k",
+            "-movflags", "+faststart",
+        ],
+    }
+}
+
+fn audio_args(job: &ConversionJob) -> Vec<&'static str> {
+    if let Some(options) = &job.advanced_options {
+        return advanced_audio_args(job, options);
+    }
+
+    match job.preset.quality_mode {
+        QualityMode::FastRemux | QualityMode::KeepSource => vec!["-vn", "-c:a", "copy"],
+        QualityMode::FastEncode => vec!["-vn", "-c:a", audio_codec(job), "-b:a", "160k"],
+        QualityMode::SmallSize => vec!["-vn", "-c:a", audio_codec(job), "-b:a", "96k"],
+        QualityMode::Balanced => vec!["-vn", "-c:a", audio_codec(job), "-b:a", "192k"],
+        QualityMode::HighQuality => high_quality_audio_args(job),
+    }
+}
+
+fn advanced_video_args(job: &ConversionJob, options: &AdvancedOptions) -> Vec<&'static str> {
+    if options.copy_streams {
+        return vec!["-map", "0", "-c", "copy", "-movflags", "+faststart"];
+    }
+
+    let mut args = vec!["-map", "0:v:0?", "-map", "0:a:0?"];
+    let video_codec = allowed_video_codec(job, options.video_codec.as_deref());
+    args.extend(["-c:v", video_codec]);
+
+    match video_codec {
+        "libvpx-vp9" => {
+            args.extend(["-deadline", "good", "-cpu-used", "4", "-b:v", "0", "-crf", quality_to_crf(options.video_quality).unwrap_or("30")]);
+        }
+        "mpeg4" => {
+            args.extend(["-q:v", quality_to_qscale(options.video_quality).unwrap_or("5")]);
+        }
+        _ => {}
+    }
+
+    if let Some(width) = options.max_width.and_then(max_width_filter) {
+        args.extend(["-vf", width]);
+    }
+
+    let audio_codec = allowed_audio_codec(job, options.audio_codec.as_deref());
+    args.extend(["-c:a", audio_codec]);
+    if let Some(bitrate) = allowed_bitrate(options.audio_bitrate.as_deref()) {
+        args.extend(["-b:a", bitrate]);
+    } else if audio_codec != "flac" && audio_codec != "pcm_s16le" {
+        args.extend(["-b:a", "192k"]);
+    }
+
+    if job.target_format != "webm" {
+        args.extend(["-movflags", "+faststart"]);
+    }
+
+    args
+}
+
+fn advanced_audio_args(job: &ConversionJob, options: &AdvancedOptions) -> Vec<&'static str> {
+    if options.copy_streams {
+        return vec!["-vn", "-c:a", "copy"];
+    }
+
+    let audio_codec = allowed_audio_codec(job, options.audio_codec.as_deref());
+    let mut args = vec!["-vn", "-c:a", audio_codec];
+    if audio_codec == "flac" {
+        args.extend(["-compression_level", "8"]);
+    } else if let Some(bitrate) = allowed_bitrate(options.audio_bitrate.as_deref()) {
+        args.extend(["-b:a", bitrate]);
+    } else if audio_codec != "pcm_s16le" {
+        args.extend(["-b:a", "192k"]);
+    }
+    args
+}
+
+fn allowed_video_codec(job: &ConversionJob, requested: Option<&str>) -> &'static str {
+    let allowed: &[&str] = if job.target_format == "webm" {
+        &["libvpx-vp9"]
+    } else {
+        &["mpeg4"]
+    };
+    requested.and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec)).unwrap_or(allowed[0])
+}
+
+fn allowed_audio_codec(job: &ConversionJob, requested: Option<&str>) -> &'static str {
+    let allowed: &[&str] = match job.target_format.as_str() {
+        "webm" | "opus" | "ogg" => &["libopus"],
+        "flac" => &["flac"],
+        "wav" => &["pcm_s16le"],
+        _ => &["aac"],
+    };
+    requested.and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec)).unwrap_or(allowed[0])
+}
+
+fn allowed_bitrate(requested: Option<&str>) -> Option<&'static str> {
+    match requested {
+        Some("96k") => Some("96k"),
+        Some("128k") => Some("128k"),
+        Some("160k") => Some("160k"),
+        Some("192k") => Some("192k"),
+        Some("256k") => Some("256k"),
+        Some("320k") => Some("320k"),
+        _ => None,
+    }
+}
+
+fn quality_to_crf(quality: Option<u8>) -> Option<&'static str> {
+    match quality.unwrap_or(50) {
+        0..=20 => Some("38"),
+        21..=40 => Some("34"),
+        41..=60 => Some("30"),
+        61..=80 => Some("26"),
+        _ => Some("22"),
+    }
+}
+
+fn quality_to_qscale(quality: Option<u8>) -> Option<&'static str> {
+    match quality.unwrap_or(50) {
+        0..=20 => Some("8"),
+        21..=40 => Some("7"),
+        41..=60 => Some("5"),
+        61..=80 => Some("3"),
+        _ => Some("2"),
+    }
+}
+
+fn max_width_filter(width: u32) -> Option<&'static str> {
+    match width {
+        720 => Some("scale='min(720,iw)':-2"),
+        1280 => Some("scale='min(1280,iw)':-2"),
+        1920 => Some("scale='min(1920,iw)':-2"),
+        3840 => Some("scale='min(3840,iw)':-2"),
+        _ => None,
+    }
+}
+
+fn high_quality_audio_args(job: &ConversionJob) -> Vec<&'static str> {
+    match job.target_format.as_str() {
+        "flac" => vec!["-vn", "-c:a", "flac", "-compression_level", "8"],
+        "wav" => vec!["-vn", "-c:a", "pcm_s16le"],
+        _ => vec!["-vn", "-c:a", audio_codec(job), "-b:a", "320k"],
+    }
+}
+
+fn audio_codec(job: &ConversionJob) -> &'static str {
+    match job.target_format.as_str() {
+        "flac" => "flac",
+        "ogg" | "opus" => "libopus",
+        "wav" => "pcm_s16le",
+        _ => "aac",
+    }
 }
 
 pub fn parse_ffmpeg_progress_line(line: &str, duration_seconds: Option<f64>) -> Option<f32> {
@@ -175,13 +355,34 @@ async fn run_image(job: &mut ConversionJob, cancel: Arc<AtomicBool>) -> Result<(
     }
     let input = job.input_path.clone();
     let output = job.output_path.clone();
+    let quality_mode = job.preset.quality_mode.clone();
+    let image_quality = job.advanced_options.as_ref().and_then(|options| options.image_quality);
     tokio::task::spawn_blocking(move || -> Result<()> {
         let image = image::open(&input).context("Failed to decode image")?;
-        image.save(&output).context("Failed to encode image")?;
+        save_image_with_preset(image, &output, quality_mode, image_quality)?;
         Ok(())
     })
     .await??;
     job.progress = 1.0;
+    Ok(())
+}
+
+fn save_image_with_preset(image: image::DynamicImage, output: &str, mode: QualityMode, override_quality: Option<u8>) -> Result<()> {
+    let output_path = Path::new(output);
+    match output_path.extension().and_then(|ext| ext.to_str()).unwrap_or_default().to_ascii_lowercase().as_str() {
+        "jpg" | "jpeg" => {
+            let quality = override_quality.unwrap_or_else(|| match mode {
+                QualityMode::SmallSize => 70,
+                QualityMode::FastEncode => 82,
+                QualityMode::HighQuality | QualityMode::KeepSource => 95,
+                QualityMode::FastRemux | QualityMode::Balanced => 86,
+            });
+            let file = std::fs::File::create(output_path).context("Failed to create image output")?;
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(file, quality);
+            encoder.encode_image(&image).context("Failed to encode JPEG")?;
+        }
+        _ => image.save(output_path).context("Failed to encode image")?,
+    }
     Ok(())
 }
 
@@ -232,6 +433,17 @@ fn human_error(error: &str) -> String {
     }
 }
 
+fn remove_failed_output(job: &ConversionJob) {
+    if job.output_path == job.input_path {
+        return;
+    }
+
+    let output = Path::new(&job.output_path);
+    if output.is_file() {
+        let _ = std::fs::remove_file(output);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,9 +459,11 @@ mod tests {
             category: FileCategory::Video,
             preset: ConversionPreset {
                 name: "test".into(),
+                description: "test".into(),
                 quality_mode: mode,
                 overwrite_policy: OverwritePolicy::Rename,
             },
+            advanced_options: None,
             status: JobStatus::Queued,
             progress: 0.0,
             speed: None,
@@ -263,6 +477,31 @@ mod tests {
         let args = build_ffmpeg_args(&job(QualityMode::Balanced));
         assert!(args.contains(&"-progress".to_string()));
         assert!(args.contains(&"libvpx-vp9".to_string()));
+    }
+
+    #[test]
+    fn builds_args_for_fast_remux() {
+        let args = build_ffmpeg_args(&job(QualityMode::FastRemux));
+        assert!(args.contains(&"-c".to_string()));
+        assert!(args.contains(&"copy".to_string()));
+    }
+
+    #[test]
+    fn advanced_video_rejects_codec_that_conflicts_with_webm() {
+        let mut job = job(QualityMode::Balanced);
+        job.advanced_options = Some(AdvancedOptions {
+            video_codec: Some("mpeg4".into()),
+            audio_codec: Some("aac".into()),
+            video_quality: Some(70),
+            video_bitrate: None,
+            audio_bitrate: Some("192k".into()),
+            max_width: Some(1280),
+            image_quality: None,
+            copy_streams: false,
+        });
+        let args = build_ffmpeg_args(&job);
+        assert!(args.contains(&"libvpx-vp9".to_string()));
+        assert!(!args.contains(&"mpeg4".to_string()));
     }
 
     #[test]

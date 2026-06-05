@@ -23,6 +23,8 @@ pub enum JobStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum QualityMode {
+    FastRemux,
+    FastEncode,
     SmallSize,
     Balanced,
     HighQuality,
@@ -40,6 +42,7 @@ pub enum OverwritePolicy {
 #[serde(rename_all = "camelCase")]
 pub struct ConversionPreset {
     pub name: String,
+    pub description: String,
     pub quality_mode: QualityMode,
     pub overwrite_policy: OverwritePolicy,
 }
@@ -54,11 +57,25 @@ pub struct ConversionJob {
     pub target_format: String,
     pub category: FileCategory,
     pub preset: ConversionPreset,
+    pub advanced_options: Option<AdvancedOptions>,
     pub status: JobStatus,
     pub progress: f32,
     pub speed: Option<String>,
     pub eta_seconds: Option<u64>,
     pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdvancedOptions {
+    pub video_codec: Option<String>,
+    pub audio_codec: Option<String>,
+    pub video_quality: Option<u8>,
+    pub video_bitrate: Option<String>,
+    pub audio_bitrate: Option<String>,
+    pub max_width: Option<u32>,
+    pub image_quality: Option<u8>,
+    pub copy_streams: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,8 +106,16 @@ pub struct QueueOptions {
     pub output_dir: Option<String>,
     pub target_format: String,
     pub preset: ConversionPreset,
+    pub advanced_options: Option<AdvancedOptions>,
     pub parallelism: Option<usize>,
     pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateJobGroup {
+    pub paths: Vec<String>,
+    pub options: QueueOptions,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,22 +152,38 @@ pub fn extension_for_path(path: &str) -> String {
 pub fn default_presets() -> Vec<ConversionPreset> {
     vec![
         ConversionPreset {
+            name: "Fast remux".into(),
+            description: "Changes the container without re-encoding when streams are compatible.".into(),
+            quality_mode: QualityMode::FastRemux,
+            overwrite_policy: OverwritePolicy::Rename,
+        },
+        ConversionPreset {
+            name: "Fast encode".into(),
+            description: "Prioritizes speed with moderate compression and broadly compatible codecs.".into(),
+            quality_mode: QualityMode::FastEncode,
+            overwrite_policy: OverwritePolicy::Rename,
+        },
+        ConversionPreset {
             name: "Balanced".into(),
+            description: "Good default quality, size, and compatibility for everyday conversion.".into(),
             quality_mode: QualityMode::Balanced,
             overwrite_policy: OverwritePolicy::Rename,
         },
         ConversionPreset {
             name: "Small size".into(),
+            description: "Smaller files with more compression and lower audio bitrates.".into(),
             quality_mode: QualityMode::SmallSize,
             overwrite_policy: OverwritePolicy::Rename,
         },
         ConversionPreset {
             name: "High quality".into(),
+            description: "Preserves more detail with larger files and slower encoding.".into(),
             quality_mode: QualityMode::HighQuality,
             overwrite_policy: OverwritePolicy::Rename,
         },
         ConversionPreset {
             name: "Keep source quality".into(),
+            description: "Copies streams when possible, otherwise uses conservative quality settings.".into(),
             quality_mode: QualityMode::KeepSource,
             overwrite_policy: OverwritePolicy::Rename,
         },

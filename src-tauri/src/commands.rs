@@ -1,7 +1,7 @@
 use crate::{
     engines::resolve_output_path,
     models::{
-        category_for_extension, default_presets, extension_for_path, ConversionJob, FileCategory, JobStatus,
+        category_for_extension, default_presets, extension_for_path, ConversionJob, CreateJobGroup, FileCategory, JobStatus,
         ProbeResult, QueueOptions, SupportedFormats, AUDIO_FORMATS, IMAGE_FORMATS, VIDEO_FORMATS,
     },
     queue::{default_parallelism, QueueState},
@@ -73,6 +73,7 @@ pub async fn create_jobs(
             target_format: options.target_format.clone(),
             category,
             preset: options.preset.clone(),
+            advanced_options: options.advanced_options.clone(),
             status: JobStatus::Queued,
             progress: 0.0,
             speed: None,
@@ -86,15 +87,52 @@ pub async fn create_jobs(
 }
 
 #[tauri::command]
+pub async fn create_jobs_batch(
+    groups: Vec<CreateJobGroup>,
+    state: State<'_, Arc<QueueState>>,
+) -> Result<Vec<ConversionJob>, String> {
+    let mut jobs = Vec::new();
+
+    for group in groups {
+        for path in group.paths {
+            let source_format = extension_for_path(&path);
+            let category = category_for_extension(&source_format);
+            let output_path = resolve_output_path(
+                &path,
+                group.options.output_dir.as_deref(),
+                &group.options.target_format,
+                &group.options.preset.overwrite_policy,
+            )
+            .map_err(|error| error.to_string())?;
+
+            jobs.push(ConversionJob {
+                id: Uuid::new_v4().to_string(),
+                input_path: path,
+                output_path,
+                source_format,
+                target_format: group.options.target_format.clone(),
+                category,
+                preset: group.options.preset.clone(),
+                advanced_options: group.options.advanced_options.clone(),
+                status: JobStatus::Queued,
+                progress: 0.0,
+                speed: None,
+                eta_seconds: None,
+                error: None,
+            });
+        }
+    }
+
+    state.add_jobs(jobs.clone()).await;
+    Ok(state.jobs().await)
+}
+
+#[tauri::command]
 pub async fn start_queue(
     app: AppHandle,
     options: QueueOptions,
     state: State<'_, Arc<QueueState>>,
 ) -> Result<Vec<ConversionJob>, String> {
-    state
-        .update_queued_options(&options)
-        .await
-        .map_err(|error| error.to_string())?;
     Ok(state.inner().clone().start(app, options).await)
 }
 

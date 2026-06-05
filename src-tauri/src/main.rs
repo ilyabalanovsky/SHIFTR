@@ -15,6 +15,7 @@ fn main() {
             commands::get_supported_formats,
             commands::probe_file,
             commands::create_jobs,
+            commands::create_jobs_batch,
             commands::update_queued_jobs,
             commands::start_queue,
             commands::pause_queue,

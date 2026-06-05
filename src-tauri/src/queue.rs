@@ -29,6 +29,13 @@ impl QueueState {
         }
     }
 
+    pub async fn add_jobs(&self, jobs: Vec<ConversionJob>) {
+        let mut map = self.jobs.lock().await;
+        for job in jobs {
+            map.insert(job.id.clone(), job);
+        }
+    }
+
     pub async fn jobs(&self) -> Vec<ConversionJob> {
         self.jobs.lock().await.values().cloned().collect()
     }
@@ -38,6 +45,7 @@ impl QueueState {
         for job in jobs.values_mut().filter(|job| job.status == JobStatus::Queued) {
             job.target_format = options.target_format.clone();
             job.preset = options.preset.clone();
+            job.advanced_options = options.advanced_options.clone();
             job.output_path = resolve_output_path(
                 &job.input_path,
                 options.output_dir.as_deref(),

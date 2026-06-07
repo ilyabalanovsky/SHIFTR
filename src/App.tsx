@@ -18,6 +18,7 @@ import {
   FolderOpen,
   HardDrive,
   Pause,
+  Pencil,
   Play,
   RotateCcw,
   Search,
@@ -33,6 +34,10 @@ type QualityMode = 'fastRemux' | 'fastEncode' | 'smallSize' | 'balanced' | 'high
 type OverwritePolicy = 'rename' | 'overwrite'
 type AppMode = 'media' | 'documents'
 type DocumentOperation = 'imagesToPdf' | 'mergePdfs'
+type ReleaseStatus = {
+  latestVersion: string | null
+  updateAvailable: boolean
+}
 
 type ConversionPreset = {
   name: string
@@ -48,6 +53,8 @@ type AdvancedOptions = {
   videoBitrate?: string | null
   audioBitrate?: string | null
   maxWidth?: number | null
+  frameRate?: number | null
+  targetSizeMb?: number | null
   imageQuality?: number | null
   copyStreams: boolean
 }
@@ -66,8 +73,36 @@ type ConversionJob = {
   status: JobStatus
   progress: number
   speed?: string | null
+  processingSeconds?: number | null
   etaSeconds?: number | null
   error?: string | null
+  errorDetails?: string | null
+}
+
+type EncodingPreset = {
+  id: string
+  name: string
+  description: string
+  category: FileCategory
+  platform?: string | null
+  targetFormat: string
+  preset: ConversionPreset
+  advancedOptions?: AdvancedOptions | null
+  builtIn: boolean
+}
+
+type SizeTargetValidation = {
+  applicable: boolean
+  warnings: string[]
+  estimates: Array<{
+    path: string
+    durationSeconds?: number | null
+    totalKbps?: number | null
+    videoKbps?: number | null
+    audioKbps?: number | null
+    applicable: boolean
+    warning?: string | null
+  }>
 }
 
 type SupportedFormats = {
@@ -114,6 +149,7 @@ type BatchGroup = {
   paths: string[]
   targetFormat: string
   presetName: string
+  presetOverride: ConversionPreset | null
   advancedOpen: boolean
   advancedOptions: AdvancedOptions | null
 }
@@ -205,7 +241,12 @@ const defaultTargets: Record<MediaCategory, string> = {
 
 const audioBitrates = ['96k', '128k', '160k', '192k', '256k', '320k']
 const maxWidths = ['Original', '720', '1280', '1920', '3840']
+const frameRates = ['Same as source', '24', '25', '30', '50', '60', '120']
+const targetSizes = ['Keep auto', '8', '10', '25', '50', '100', '250', '500', '1024', 'Custom...']
+const fixedTargetSizes = [8, 10, 25, 50, 100, 250, 500, 1024]
 const qualityLevels = ['20', '40', '60', '80', '95']
+const appVersion = __APP_VERSION__
+const githubReleasesRepo = __GITHUB_RELEASES_REPO__
 
 function App() {
   const [activeMode, setActiveMode] = useState<AppMode>('media')
@@ -217,16 +258,23 @@ function App() {
   const [outputDir, setOutputDir] = useState('')
   const [parallelism, setParallelism] = useState(2)
   const [ffmpegPath, setFfmpegPath] = useState('')
-  const [hardwareAcceleration, setHardwareAcceleration] = useState(true)
   const [isRunning, setIsRunning] = useState(false)
   const [dragActive, setDragActive] = useState(false)
   const [lastError, setLastError] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [isPresetsOpen, setIsPresetsOpen] = useState(false)
+  const [encodingPresets, setEncodingPresets] = useState<EncodingPreset[]>([])
+  const [customPresetName, setCustomPresetName] = useState('')
   const [batchGroups, setBatchGroups] = useState<BatchGroup[]>([])
   const [activeGroupIndex, setActiveGroupIndex] = useState(0)
   const [completedGroupIndexes, setCompletedGroupIndexes] = useState<number[]>([])
   const [batchOutputDir, setBatchOutputDir] = useState('')
   const [documentSetup, setDocumentSetup] = useState<DocumentSetup | null>(null)
+  const [renameDraft, setRenameDraft] = useState<{ id: string; value: string } | null>(null)
+  const [releaseStatus, setReleaseStatus] = useState<ReleaseStatus | null>(null)
+  const [expandedErrorIds, setExpandedErrorIds] = useState<string[]>([])
+  const [customSizeCategories, setCustomSizeCategories] = useState<MediaCategory[]>([])
+  const [sizeTargetValidation, setSizeTargetValidation] = useState<{ key: string; value: SizeTargetValidation } | null>(null)
 
   const selectedPreset = useMemo(
     () => formats.presets.find((preset) => preset.name === presetName) ?? formats.presets[0] ?? fallbackPreset,
@@ -237,9 +285,28 @@ function App() {
     const completed = jobs.filter((job) => job.status === 'done').length
     const failed = jobs.filter((job) => job.status === 'failed').length
     const running = jobs.filter((job) => job.status === 'running').length
+    const queued = jobs.filter((job) => job.status === 'queued').length
     const average = jobs.length ? jobs.reduce((sum, job) => sum + job.progress, 0) / jobs.length : 0
-    return { completed, failed, running, average }
-  }, [jobs])
+    const completedDurations = jobs
+      .filter((job) => job.status === 'done' && job.processingSeconds != null && job.processingSeconds > 0)
+      .map((job) => job.processingSeconds ?? 0)
+    const runningProjectedDurations = jobs
+      .filter((job) => job.status === 'running' && job.processingSeconds != null && job.progress > 0.02)
+      .map((job) => Math.ceil((job.processingSeconds ?? 0) / job.progress))
+    const knownDurations = completedDurations.length ? completedDurations : runningProjectedDurations
+    const averageJobSeconds = knownDurations.length
+      ? knownDurations.reduce((sum, seconds) => sum + seconds, 0) / knownDurations.length
+      : null
+    const runningEtas = jobs
+      .filter((job) => job.status === 'running' && job.etaSeconds != null)
+      .map((job) => job.etaSeconds ?? 0)
+    const runningEta = runningEtas.length ? Math.max(...runningEtas) : null
+    const queuedEta = averageJobSeconds ? Math.ceil(queued / Math.max(1, parallelism)) * averageJobSeconds : null
+    const queueEta = runningEta != null || queuedEta != null
+      ? Math.ceil((runningEta ?? 0) + (queuedEta ?? 0))
+      : null
+    return { completed, failed, running, average, queueEta }
+  }, [jobs, parallelism])
 
   const activeGroup = batchGroups[activeGroupIndex]
   const isBatchModalOpen = batchGroups.length > 0
@@ -262,6 +329,8 @@ function App() {
       })
       .catch(() => setFormats(fallbackFormats))
 
+    refreshEncodingPresets()
+
     const unlistenPromise = listen<QueueUpdate>('queue://job-updated', (event) => {
       setJobs((current) =>
         current.map((job) => (job.id === event.payload.job.id ? event.payload.job : job)),
@@ -273,11 +342,81 @@ function App() {
     }
   }, [])
 
+  function refreshEncodingPresets() {
+    invoke<EncodingPreset[]>('get_encoding_presets')
+      .then(setEncodingPresets)
+      .catch((error) => setLastError(String(error)))
+  }
+
   useEffect(() => {
     invoke<ConversionCapabilities>('get_conversion_capabilities', { ffmpegPath: ffmpegPath || null })
       .then(setCapabilities)
       .catch((error) => setCapabilities({ ...fallbackCapabilities, warnings: [String(error)] }))
   }, [ffmpegPath])
+
+  useEffect(() => {
+    if (!githubReleasesRepo) return
+
+    const controller = new AbortController()
+    fetch(`https://api.github.com/repos/${githubReleasesRepo}/releases/latest`, {
+      signal: controller.signal,
+      headers: { Accept: 'application/vnd.github+json' },
+    })
+      .then((response) => response.ok ? response.json() as Promise<{ tag_name?: string; name?: string }> : null)
+      .then((release) => {
+        const latestVersion = normalizeVersion(release?.tag_name ?? release?.name ?? '')
+        if (!latestVersion) return
+        setReleaseStatus({
+          latestVersion,
+          updateAvailable: compareVersions(latestVersion, appVersion) > 0,
+        })
+      })
+      .catch(() => undefined)
+
+    return () => controller.abort()
+  }, [])
+
+  useEffect(() => {
+    if (!activeGroup || !['video', 'audio'].includes(activeGroup.category)) {
+      return
+    }
+
+    const targetSizeMb = activeGroup.advancedOptions?.targetSizeMb
+    if (!targetSizeMb) {
+      return
+    }
+
+    const validationKey = sizeTargetValidationKey(activeGroup)
+    let canceled = false
+    invoke<SizeTargetValidation>('validate_size_target', {
+      request: {
+        paths: activeGroup.paths,
+        category: activeGroup.category,
+        targetSizeMb,
+        audioBitrate: activeGroup.advancedOptions?.audioBitrate ?? null,
+        ffmpegPath: ffmpegPath || null,
+      },
+    })
+      .then((validation) => {
+        if (!canceled) setSizeTargetValidation({ key: validationKey, value: validation })
+      })
+      .catch((error) => {
+        if (!canceled) {
+          setSizeTargetValidation({
+            key: validationKey,
+            value: {
+              applicable: false,
+              warnings: [String(error)],
+              estimates: [],
+            },
+          })
+        }
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [activeGroup, ffmpegPath])
 
   const categoryForPath = useCallback((path: string): FileCategory => {
     const ext = path.split('.').pop()?.toLowerCase() ?? ''
@@ -317,6 +456,7 @@ function App() {
         paths: buckets[category],
         targetFormat: preferredTarget(category),
         presetName,
+        presetOverride: null,
         advancedOpen: false,
         advancedOptions: null,
       }))
@@ -410,6 +550,10 @@ function App() {
     }
   }
 
+  function resetOutputDirToSource() {
+    setOutputDir('')
+  }
+
   async function chooseBatchOutputDir() {
     const selected = await open({ directory: true, multiple: false })
     if (typeof selected === 'string') {
@@ -437,7 +581,7 @@ function App() {
       options: {
         outputDir: batchOutputDir || null,
         targetFormat: group.targetFormat,
-        preset: presetByName(group.presetName),
+        preset: group.presetOverride ?? presetByName(group.presetName),
         advancedOptions: normalizedAdvancedOptions(group),
         parallelism,
         ffmpegPath: ffmpegPath || null,
@@ -488,7 +632,7 @@ function App() {
     setCompletedGroupIndexes([])
   }
 
-  function updateActiveGroup(update: Partial<Pick<BatchGroup, 'targetFormat' | 'presetName' | 'advancedOpen' | 'advancedOptions'>>) {
+  function updateActiveGroup(update: Partial<Pick<BatchGroup, 'targetFormat' | 'presetName' | 'presetOverride' | 'advancedOpen' | 'advancedOptions'>>) {
     setBatchGroups((current) =>
       current.map((group, index) => index === activeGroupIndex ? { ...group, ...update } : group),
     )
@@ -511,21 +655,24 @@ function App() {
     if (group.category === 'audio') {
       return {
         copyStreams: options.copyStreams,
-        audioCodec: allowedAudioCodecs(group.targetFormat, capabilities)[0]?.id,
+        audioCodec: allowedCodecId(options.audioCodec, allowedAudioCodecs(group.targetFormat, capabilities)),
         audioBitrate: losslessAudioOnly(group.targetFormat, capabilities) 
           ? null
           : allowedBitrate(options.audioBitrate),
+        targetSizeMb: allowedTargetSizeMb(options.targetSizeMb),
       }
     }
     return {
       copyStreams: options.copyStreams,
-      videoCodec: allowedVideoCodecs(group.targetFormat, capabilities)[0]?.id,
-      audioCodec: allowedAudioCodecs(group.targetFormat, capabilities)[0]?.id,
+      videoCodec: allowedCodecId(options.videoCodec, allowedVideoCodecs(group.targetFormat, capabilities)),
+      audioCodec: allowedCodecId(options.audioCodec, allowedAudioCodecs(group.targetFormat, capabilities)),
       videoQuality: clampQuality(options.videoQuality ?? 60),
       audioBitrate: losslessAudioOnly(group.targetFormat, capabilities)
         ? null
         : allowedBitrate(options.audioBitrate),
       maxWidth: allowedMaxWidth(options.maxWidth),
+      frameRate: allowedFrameRate(options.frameRate),
+      targetSizeMb: allowedTargetSizeMb(options.targetSizeMb),
     }
   }
 
@@ -537,6 +684,8 @@ function App() {
       videoQuality: 60,
       audioBitrate: '192k',
       maxWidth: null,
+      frameRate: null,
+      targetSizeMb: null,
       imageQuality: 86,
     }
   }
@@ -586,17 +735,154 @@ function App() {
     }
   }
 
+  async function retryJob(id: string) {
+    setLastError(null)
+    try {
+      const retried = await invoke<ConversionJob>('retry_job', { id })
+      setExpandedErrorIds((current) => current.filter((item) => item !== id))
+      setJobs((current) => current.map((job) => (job.id === id ? retried : job)))
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  async function removeJob(id: string) {
+    setLastError(null)
+    try {
+      const remaining = await invoke<ConversionJob[]>('remove_job', { id })
+      setExpandedErrorIds((current) => current.filter((item) => item !== id))
+      setJobs(remaining)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  function startRename(job: ConversionJob) {
+    if (job.status !== 'queued') return
+    setRenameDraft({ id: job.id, value: fileName(job.outputPath) })
+  }
+
+  async function confirmRename() {
+    if (!renameDraft) return
+    setLastError(null)
+    try {
+      const updated = await invoke<ConversionJob>('rename_job_output', {
+        options: {
+          id: renameDraft.id,
+          outputName: renameDraft.value,
+        },
+      })
+      setJobs((current) => current.map((job) => (job.id === updated.id ? updated : job)))
+      setRenameDraft(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
   async function openOutput(path: string) {
     await invoke('open_output_folder', { path })
   }
 
-  function clearDone() {
-    setJobs((current) => current.filter((job) => !['done', 'failed', 'canceled'].includes(job.status)))
+  async function clearDone() {
+    setLastError(null)
+    try {
+      const remaining = await invoke<ConversionJob[]>('clear_finished_jobs')
+      setExpandedErrorIds((current) => current.filter((id) => remaining.some((job) => job.id === id)))
+      setJobs(remaining)
+    } catch (error) {
+      setLastError(String(error))
+    }
   }
 
-  function resetQueue() {
-    setJobs([])
+  async function resetQueue() {
     setLastError(null)
+    try {
+      await invoke('reset_queue')
+      setExpandedErrorIds([])
+      setJobs([])
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  function toggleErrorDetails(id: string) {
+    setExpandedErrorIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id],
+    )
+  }
+
+  function applyEncodingPreset(preset: EncodingPreset) {
+    const compatibleGroupIndex = activeGroup?.category === preset.category
+      ? activeGroupIndex
+      : batchGroups.findIndex((group) => group.category === preset.category)
+
+    if (compatibleGroupIndex < 0) {
+      setLastError(`Add ${preset.category} files before applying this preset.`)
+      return
+    }
+
+    setBatchGroups((current) =>
+      current.map((group, index) => index === compatibleGroupIndex
+        ? {
+          ...group,
+          targetFormat: preset.targetFormat,
+          presetName: preset.preset.name,
+          presetOverride: preset.preset,
+          advancedOpen: Boolean(preset.advancedOptions),
+          advancedOptions: preset.advancedOptions ?? null,
+        }
+        : group),
+    )
+    setActiveGroupIndex(compatibleGroupIndex)
+    setIsPresetsOpen(false)
+    setLastError(null)
+  }
+
+  async function saveActiveGroupAsPreset() {
+    if (!activeGroup) {
+      setLastError('Add files before saving a preset.')
+      return
+    }
+    const name = customPresetName.trim()
+    if (!name) {
+      setLastError('Enter a preset name first.')
+      return
+    }
+
+    const preset: EncodingPreset = {
+      id: `custom_${Date.now()}`,
+      name,
+      description: `Custom ${categoryLabel(activeGroup.category).toLowerCase()} recipe.`,
+      category: activeGroup.category,
+      platform: 'Custom',
+      targetFormat: activeGroup.targetFormat,
+      preset: activeGroup.presetOverride ?? presetByName(activeGroup.presetName),
+      advancedOptions: normalizedAdvancedOptions({
+        ...activeGroup,
+        advancedOpen: true,
+        advancedOptions: ensureAdvancedOptions(activeGroup),
+      }),
+      builtIn: false,
+    }
+
+    try {
+      const updated = await invoke<EncodingPreset[]>('save_custom_encoding_preset', { preset })
+      setEncodingPresets(updated)
+      setCustomPresetName('')
+      setLastError(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  async function deleteEncodingPreset(id: string) {
+    try {
+      const updated = await invoke<EncodingPreset[]>('delete_custom_encoding_preset', { id })
+      setEncodingPresets(updated)
+      setLastError(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
   }
 
   return (
@@ -632,6 +918,9 @@ function App() {
         </div>
 
         <div className="nav-actions">
+          <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(true)} title="Encoding presets">
+            <SlidersHorizontal size={22} />
+          </button>
           <button className="nav-icon" type="button" onClick={() => setIsSettingsOpen(true)} title="Settings">
             <Settings2 size={22} />
           </button>
@@ -697,7 +986,37 @@ function App() {
                 <div className="job-icon">{iconFor(job.category)}</div>
                 <div className="job-main">
                   <div className="job-title">
-                    <strong>{jobTitle(job)}</strong>
+                    <div className="job-name-line">
+                      {renameDraft?.id === job.id ? (
+                        <div className="rename-inline">
+                          <input
+                            autoFocus
+                            value={renameDraft.value}
+                            onChange={(event) => setRenameDraft({ ...renameDraft, value: event.target.value })}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') void confirmRename()
+                              if (event.key === 'Escape') setRenameDraft(null)
+                            }}
+                            aria-label="Output file name"
+                          />
+                          <button className="icon-button" type="button" onClick={confirmRename} title="Save output name">
+                            <Check size={15} />
+                          </button>
+                          <button className="icon-button danger" type="button" onClick={() => setRenameDraft(null)} title="Cancel rename">
+                            <X size={15} />
+                          </button>
+                        </div>
+                      ) : (
+                        <>
+                          <strong>{jobTitle(job)}</strong>
+                          {job.status === 'queued' && (
+                            <button className="rename-button" type="button" onClick={() => startRename(job)} title="Rename output file">
+                              <Pencil size={14} />
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </div>
                     <span>{Math.round(job.progress * 100)}%</span>
                   </div>
                   <div className="job-progress-line">
@@ -708,9 +1027,20 @@ function App() {
                     <span className="job-state">{job.status}</span>
                   </div>
                   <div className="job-meta">
-                    {job.speed && <span>{job.speed}</span>}
+                    {job.processingSeconds != null && <span>{formatProcessingTime(job.processingSeconds)}</span>}
+                    {job.status === 'running' && job.etaSeconds != null && (
+                      <span>ETA {formatProcessingTime(job.etaSeconds)}</span>
+                    )}
                     {job.error && <span className="job-error">{job.error}</span>}
+                    {job.errorDetails && (
+                      <button className="details-toggle" type="button" onClick={() => toggleErrorDetails(job.id)}>
+                        {expandedErrorIds.includes(job.id) ? 'Hide details' : 'Technical details'}
+                      </button>
+                    )}
                   </div>
+                  {job.errorDetails && expandedErrorIds.includes(job.id) && (
+                    <pre className="error-details">{job.errorDetails}</pre>
+                  )}
                 </div>
 
                 <div className="job-actions">
@@ -720,10 +1050,19 @@ function App() {
                     </button>
                   ) : job.status === 'failed' ? (
                     <>
-                      <button className="icon-button" type="button" title="Retry">
+                      <button className="icon-button" type="button" onClick={() => retryJob(job.id)} title="Retry">
                         <RotateCcw size={17} />
                       </button>
-                      <button className="icon-button danger" type="button" onClick={() => cancelJob(job.id)} title="Remove job">
+                      <button className="icon-button danger" type="button" onClick={() => removeJob(job.id)} title="Remove job">
+                        <X size={18} />
+                      </button>
+                    </>
+                  ) : job.status === 'canceled' ? (
+                    <>
+                      <button className="icon-button" type="button" onClick={() => retryJob(job.id)} title="Retry">
+                        <RotateCcw size={17} />
+                      </button>
+                      <button className="icon-button danger" type="button" onClick={() => removeJob(job.id)} title="Remove job">
                         <X size={18} />
                       </button>
                     </>
@@ -747,36 +1086,25 @@ function App() {
       <aside className="control-panel">
         <div className="engine-head">
           <h2>Conversion Engine</h2>
-          <p>v2.4.0-stable</p>
+          <p>
+            v{appVersion}
+            {releaseStatus && (
+              <span className={releaseStatus.updateAvailable ? 'update-available' : ''}>
+                {releaseStatus.updateAvailable ? `Latest v${releaseStatus.latestVersion} available` : 'Up to date'}
+              </span>
+            )}
+          </p>
         </div>
 
         <div className="panel-scroll">
-          <section>
-            <h3><Cpu size={16} /> Engine Settings</h3>
-            <label className="toggle-row">
-              <span>Hardware Acceleration</span>
-              <input
-                checked={hardwareAcceleration}
-                onChange={(event) => setHardwareAcceleration(event.target.checked)}
-                type="checkbox"
-              />
-            </label>
-          </section>
-
-          <section>
-            <h3><HardDrive size={16} /> Output Location</h3>
-            <div className="output-card">
-              <div>{outputDir || 'Same as source file'}</div>
-              <button type="button" onClick={chooseOutputDir}>
-                <FolderOpen size={17} /> Browse...
-              </button>
-            </div>
-          </section>
-
           <section className="stats">
             <h3><Clock3 size={16} /> Progress</h3>
             <div className="meter">
               <div style={{ width: `${Math.round(summary.average * 100)}%` }} />
+            </div>
+            <div className="queue-eta">
+              <span>Estimated time</span>
+              <strong>{summary.queueEta != null ? formatProcessingTime(summary.queueEta) : 'Estimating...'}</strong>
             </div>
             <dl>
               <div><dt>Running</dt><dd>{summary.running}</dd></div>
@@ -840,12 +1168,12 @@ function App() {
                   Preset
                   <CustomSelect
                     value={activeGroup.presetName}
-                    options={formats.presets.map((preset) => ({ value: preset.name, label: preset.name }))}
-                    onChange={(value) => updateActiveGroup({ presetName: value })}
+                    options={presetSelectOptions(activeGroup, formats)}
+                    onChange={(value) => updateActiveGroup({ presetName: value, presetOverride: null })}
                   />
                 </label>
-                <p className="preset-description">{presetByName(activeGroup.presetName).description}</p>
-                <div className="advanced-box">
+                <p className="preset-description">{activeGroup.presetOverride?.description ?? presetByName(activeGroup.presetName).description}</p>
+                <div className="advanced-disclosure">
                   <button
                     className="advanced-toggle"
                     type="button"
@@ -875,7 +1203,7 @@ function App() {
                           <label>
                             Video codec
                             <CustomSelect
-                              value={allowedVideoCodecs(activeGroup.targetFormat, capabilities)[0]?.id ?? ''}
+                              value={allowedCodecId(ensureAdvancedOptions(activeGroup).videoCodec, allowedVideoCodecs(activeGroup.targetFormat, capabilities)) ?? ''}
                               options={allowedVideoCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
                               onChange={(value) => updateAdvancedOptions({ videoCodec: value })}
                             />
@@ -896,6 +1224,14 @@ function App() {
                               onChange={(value) => updateAdvancedOptions({ maxWidth: value === 'Original' ? null : Number(value) })}
                             />
                           </label>
+                          <label>
+                            Frame rate
+                            <CustomSelect
+                              value={ensureAdvancedOptions(activeGroup).frameRate ? String(ensureAdvancedOptions(activeGroup).frameRate) : 'Same as source'}
+                              options={frameRates.map((rate) => ({ value: rate, label: rate === 'Same as source' ? rate : `${rate} fps` }))}
+                              onChange={(value) => updateAdvancedOptions({ frameRate: value === 'Same as source' ? null : Number(value) })}
+                            />
+                          </label>
                         </>
                       )}
                       {(activeGroup.category === 'audio' || activeGroup.category === 'video') && !ensureAdvancedOptions(activeGroup).copyStreams && (
@@ -903,20 +1239,60 @@ function App() {
                           <label>
                             Audio codec
                             <CustomSelect
-                              value={allowedAudioCodecs(activeGroup.targetFormat, capabilities)[0]?.id ?? ''}
+                              value={allowedCodecId(ensureAdvancedOptions(activeGroup).audioCodec, allowedAudioCodecs(activeGroup.targetFormat, capabilities)) ?? ''}
                               options={allowedAudioCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
                               onChange={(value) => updateAdvancedOptions({ audioCodec: value })}
                             />
                           </label>
                           {!losslessAudioOnly(activeGroup.targetFormat, capabilities) && (
-                            <label>
-                              Audio bitrate
-                              <CustomSelect
-                                value={ensureAdvancedOptions(activeGroup).audioBitrate ?? '192k'}
-                                options={audioBitrates.map((bitrate) => ({ value: bitrate, label: bitrate }))}
-                                onChange={(value) => updateAdvancedOptions({ audioBitrate: value })}
-                              />
-                            </label>
+                            <>
+                              <label>
+                                Audio bitrate
+                                <CustomSelect
+                                  value={ensureAdvancedOptions(activeGroup).audioBitrate ?? '192k'}
+                                  options={audioBitrates.map((bitrate) => ({ value: bitrate, label: bitrate }))}
+                                  onChange={(value) => updateAdvancedOptions({ audioBitrate: value })}
+                                />
+                              </label>
+                              <label>
+                                Size target
+                                <CustomSelect
+                                  value={targetSizeSelectValue(activeGroup, customSizeCategories)}
+                                  options={targetSizes.map((size) => ({ value: size, label: targetSizeLabel(size) }))}
+                                  onChange={(value) => {
+                                    if (value === 'Keep auto') {
+                                      setCustomSizeCategories((current) => current.filter((category) => category !== activeGroup.category))
+                                      updateAdvancedOptions({ targetSizeMb: null })
+                                    } else if (value === 'Custom...') {
+                                      setCustomSizeCategories((current) => Array.from(new Set([...current, activeGroup.category])))
+                                      updateAdvancedOptions({ targetSizeMb: ensureAdvancedOptions(activeGroup).targetSizeMb ?? 26 })
+                                    } else {
+                                      setCustomSizeCategories((current) => current.filter((category) => category !== activeGroup.category))
+                                      updateAdvancedOptions({ targetSizeMb: Number(value) })
+                                    }
+                                  }}
+                                />
+                              </label>
+                              {isCustomSizeTarget(activeGroup, customSizeCategories) && (
+                                <label>
+                                  Custom size, MB
+                                  <input
+                                    min={1}
+                                    max={10240}
+                                    type="number"
+                                    value={ensureAdvancedOptions(activeGroup).targetSizeMb ?? 26}
+                                    onChange={(event) => updateAdvancedOptions({ targetSizeMb: clampTargetSize(Number(event.target.value)) })}
+                                  />
+                                </label>
+                              )}
+                              {ensureAdvancedOptions(activeGroup).targetSizeMb != null && sizeTargetValidation?.key === sizeTargetValidationKey(activeGroup) && (
+                                <div className={sizeTargetValidation.value.applicable ? 'size-target-note' : 'size-target-note warning'}>
+                                  {sizeTargetValidation.value.warnings.length > 0
+                                    ? sizeTargetValidation.value.warnings.slice(0, 3).map((warning) => <span key={warning}>{warning}</span>)
+                                    : <span>{sizeTargetSummary(sizeTargetValidation.value)}</span>}
+                                </div>
+                              )}
+                            </>
                           )}
                         </>
                       )}
@@ -933,14 +1309,10 @@ function App() {
                     </div>
                   )}
                 </div>
-                <div className="batch-file-list">
-                  {activeGroup.paths.slice(0, 5).map((path) => <span key={path}>{fileName(path)}</span>)}
-                  {activeGroup.paths.length > 5 && <span>+{activeGroup.paths.length - 5} more files</span>}
-                </div>
               </section>
 
               <section className="modal-section">
-                <h3><HardDrive size={16} /> Shared batch settings</h3>
+                <h3><HardDrive size={16} /> Output location</h3>
                 <div className="output-card">
                   <div>{batchOutputDir || 'Same as source file'}</div>
                   <button type="button" onClick={chooseBatchOutputDir}>
@@ -1040,6 +1412,74 @@ function App() {
         </div>
       )}
 
+      {isPresetsOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="settings-modal presets-modal" role="dialog" aria-modal="true" aria-labelledby="presets-title">
+            <header className="modal-head">
+              <div>
+                <p>Presets</p>
+                <h2 id="presets-title">Encoding recipes</h2>
+              </div>
+              <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(false)} title="Close presets">
+                <X size={20} />
+              </button>
+            </header>
+
+            <div className="settings-body presets-body">
+              {activeGroup && (
+                <section className="modal-section">
+                  <h3><Check size={16} /> Save current setup</h3>
+                  <div className="path-picker">
+                    <input
+                      value={customPresetName}
+                      onChange={(event) => setCustomPresetName(event.target.value)}
+                      placeholder={`${categoryLabel(activeGroup.category)} preset name`}
+                    />
+                    <button type="button" onClick={saveActiveGroupAsPreset}>Save</button>
+                  </div>
+                </section>
+              )}
+
+              <section className="modal-section">
+                <h3><SlidersHorizontal size={16} /> Built-in and custom presets</h3>
+                <div className="preset-grid">
+                  {encodingPresets.filter((preset) => isMediaCategory(preset.category)).map((preset) => (
+                    <article className="preset-card" key={preset.id}>
+                      <div>
+                        <span>{preset.platform ?? (preset.builtIn ? 'Built-in' : 'Custom')}</span>
+                        <strong>{preset.name}</strong>
+                        <p>{preset.description}</p>
+                      </div>
+                      <div className="preset-card-meta">
+                        <span>{categoryLabel(preset.category as MediaCategory)} · .{preset.targetFormat}</span>
+                        <span>{preset.builtIn ? 'Built-in' : 'Custom'}</span>
+                      </div>
+                      <div className="preset-actions">
+                        <button type="button" className="secondary-wide" onClick={() => applyEncodingPreset(preset)}>
+                          Apply
+                        </button>
+                        {!preset.builtIn && (
+                          <button type="button" className="icon-button danger" onClick={() => deleteEncodingPreset(preset.id)} title="Delete preset">
+                            <X size={17} />
+                          </button>
+                        )}
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </section>
+            </div>
+
+            <footer className="modal-footer">
+              <span className="settings-note">Presets apply to the matching batch tab.</span>
+              <button type="button" className="start-processing" onClick={() => setIsPresetsOpen(false)}>
+                Done
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
       {isSettingsOpen && (
         <div className="modal-backdrop" role="presentation">
           <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -1080,6 +1520,33 @@ function App() {
                     onChange={(event) => setParallelism(Number(event.target.value))}
                   />
                 </label>
+              </section>
+
+              <section className="modal-section">
+                <h3><HardDrive size={16} /> Default output directory</h3>
+                <label className="toggle-row">
+                  <span>Same as source file</span>
+                  <input
+                    checked={!outputDir}
+                    onChange={(event) => {
+                      if (event.target.checked) resetOutputDirToSource()
+                      else void chooseOutputDir()
+                    }}
+                    type="checkbox"
+                  />
+                </label>
+                {outputDir ? (
+                  <div className="output-card">
+                    <div>{outputDir}</div>
+                    <button type="button" onClick={chooseOutputDir}>
+                      <FolderOpen size={17} /> Browse...
+                    </button>
+                  </div>
+                ) : (
+                  <button type="button" className="secondary-wide" onClick={chooseOutputDir}>
+                    <FolderOpen size={17} /> Choose folder
+                  </button>
+                )}
               </section>
             </div>
 
@@ -1134,12 +1601,43 @@ function documentOperationDescription(setup: DocumentSetup, formats: SupportedFo
   return `${activeCount} PDF${activeCount === 1 ? '' : 's'} will be merged in the current order. Images in this import stay available if you switch operation.`
 }
 
+function isMediaCategory(category: FileCategory): category is MediaCategory {
+  return category === 'video' || category === 'audio' || category === 'image'
+}
+
 function jobTitle(job: ConversionJob) {
-  if (job.category !== 'document') return fileName(job.inputPath)
-  const count = job.inputPaths?.length ?? 1
-  if (job.documentOperation === 'imagesToPdf') return `Images to PDF · ${count} file${count === 1 ? '' : 's'}`
-  if (job.documentOperation === 'mergePdfs') return `Merged PDF · ${count} file${count === 1 ? '' : 's'}`
-  return fileName(job.inputPath)
+  return fileName(job.outputPath)
+}
+
+function formatProcessingTime(seconds: number) {
+  const total = Math.max(0, Math.floor(seconds))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const secs = total % 60
+
+  if (hours > 0) {
+    return minutes > 0 ? `${hours} hr ${minutes} min` : `${hours} hr`
+  }
+  if (minutes > 0) {
+    return secs > 0 ? `${minutes} min ${secs} sec` : `${minutes} min`
+  }
+  return `${secs} sec`
+}
+
+function normalizeVersion(value: string) {
+  return value.trim().replace(/^v/i, '')
+}
+
+function compareVersions(left: string, right: string) {
+  const leftParts = normalizeVersion(left).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
+  const rightParts = normalizeVersion(right).split(/[.-]/).map((part) => Number.parseInt(part, 10) || 0)
+  const maxLength = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const diff = (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
+    if (diff !== 0) return diff
+  }
+  return 0
 }
 
 function CustomSelect({
@@ -1206,6 +1704,14 @@ function categoryLabel(category: MediaCategory) {
   return labels[category]
 }
 
+function presetSelectOptions(group: BatchGroup, formats: SupportedFormats) {
+  const options = formats.presets.map((preset) => ({ value: preset.name, label: preset.name }))
+  if (group.presetOverride && !options.some((option) => option.value === group.presetOverride?.name)) {
+    return [{ value: group.presetOverride.name, label: group.presetOverride.name }, ...options]
+  }
+  return options
+}
+
 function allowedVideoCodecs(targetFormat: string, capabilities: ConversionCapabilities): CodecOption[] {
   const matrix = capabilities.matrix.find((item) => item.targetFormat === targetFormat)
   const codecs = matrix?.videoCodecs.filter((codec) => codec.available) ?? []
@@ -1245,12 +1751,65 @@ function codecLabel(codec: CodecOption) {
   return `${codec.label}${codec.hardware ? ' · GPU' : ''}`
 }
 
+function allowedCodecId(value: string | null | undefined, codecs: CodecOption[]) {
+  return codecs.find((codec) => codec.id === value)?.id ?? codecs[0]?.id
+}
+
 function allowedBitrate(value?: string | null) {
   return value && audioBitrates.includes(value) ? value : '192k'
 }
 
 function allowedMaxWidth(value?: number | null) {
   return value && [720, 1280, 1920, 3840].includes(value) ? value : null
+}
+
+function allowedFrameRate(value?: number | null) {
+  return value && [24, 25, 30, 50, 60, 120].includes(value) ? value : null
+}
+
+function allowedTargetSizeMb(value?: number | null) {
+  return value && value >= 1 && value <= 10240 ? Math.round(value) : null
+}
+
+function clampTargetSize(value: number) {
+  if (!Number.isFinite(value)) return 1
+  return Math.min(10240, Math.max(1, Math.round(value)))
+}
+
+function targetSizeLabel(size: string) {
+  if (size === 'Keep auto' || size === 'Custom...') return size
+  return size === '1024' ? '1 GB' : `${size} MB`
+}
+
+function targetSizeSelectValue(group: BatchGroup, customSizeCategories: MediaCategory[]) {
+  const value = group.advancedOptions?.targetSizeMb
+  if (!value) return 'Keep auto'
+  if (customSizeCategories.includes(group.category) || !fixedTargetSizes.includes(value)) return 'Custom...'
+  return String(value)
+}
+
+function isCustomSizeTarget(group: BatchGroup, customSizeCategories: MediaCategory[]) {
+  const value = group.advancedOptions?.targetSizeMb
+  return Boolean(value && (customSizeCategories.includes(group.category) || !fixedTargetSizes.includes(value)))
+}
+
+function sizeTargetValidationKey(group: BatchGroup) {
+  return [
+    group.category,
+    group.targetFormat,
+    group.advancedOptions?.targetSizeMb ?? 'auto',
+    group.advancedOptions?.audioBitrate ?? 'audio-auto',
+    group.paths.join('|'),
+  ].join(':')
+}
+
+function sizeTargetSummary(validation: SizeTargetValidation) {
+  const first = validation.estimates.find((estimate) => estimate.totalKbps != null)
+  if (!first) return 'SHIFTR will validate this target when duration is available.'
+  if (first.videoKbps != null) {
+    return `Estimated budget: ${first.videoKbps}k video + ${first.audioKbps ?? 0}k audio.`
+  }
+  return `Estimated audio bitrate: ${first.audioKbps ?? first.totalKbps}k.`
 }
 
 function clampQuality(value: number) {

@@ -1,8 +1,9 @@
 use crate::models::{ConversionJob, DocumentOperation};
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use lopdf::{
+    Document, Object, ObjectId, Stream,
     content::{Content, Operation},
-    dictionary, Document, Object, ObjectId, Stream,
+    dictionary,
 };
 use std::{collections::BTreeMap, path::Path};
 
@@ -26,7 +27,8 @@ fn images_to_pdf(paths: &[String], output_path: &str) -> Result<()> {
     let mut page_refs = Vec::new();
 
     for (index, path) in paths.iter().enumerate() {
-        let image = image::open(path).with_context(|| format!("Failed to read image {}", file_name(path)))?;
+        let image = image::open(path)
+            .with_context(|| format!("Failed to read image {}", file_name(path)))?;
         let rgb = image.to_rgb8();
         let width_px = rgb.width();
         let height_px = rgb.height();
@@ -108,7 +110,8 @@ fn merge_pdfs(paths: &[String], output_path: &str) -> Result<()> {
     let mut document = Document::with_version("1.5");
 
     for path in paths {
-        let mut doc = Document::load(path).with_context(|| format!("Failed to read PDF {}", file_name(path)))?;
+        let mut doc = Document::load(path)
+            .with_context(|| format!("Failed to read PDF {}", file_name(path)))?;
         doc.renumber_objects_with(max_id);
         max_id = doc.max_id + 1;
 
@@ -125,7 +128,10 @@ fn merge_pdfs(paths: &[String], output_path: &str) -> Result<()> {
     for (object_id, object) in documents_objects {
         match object.type_name().unwrap_or(b"") {
             b"Catalog" => {
-                catalog_object = Some((catalog_object.map(|(id, _)| id).unwrap_or(object_id), object));
+                catalog_object = Some((
+                    catalog_object.map(|(id, _)| id).unwrap_or(object_id),
+                    object,
+                ));
             }
             b"Pages" => {
                 if let Ok(dictionary) = object.as_dict() {
@@ -135,7 +141,10 @@ fn merge_pdfs(paths: &[String], output_path: &str) -> Result<()> {
                             dictionary.extend(existing_dictionary);
                         }
                     }
-                    pages_object = Some((pages_object.map(|(id, _)| id).unwrap_or(object_id), Object::Dictionary(dictionary)));
+                    pages_object = Some((
+                        pages_object.map(|(id, _)| id).unwrap_or(object_id),
+                        Object::Dictionary(dictionary),
+                    ));
                 }
             }
             b"Page" | b"Outlines" | b"Outline" => {}
@@ -150,32 +159,44 @@ fn merge_pdfs(paths: &[String], output_path: &str) -> Result<()> {
         if let Ok(dictionary) = object.as_dict() {
             let mut dictionary = dictionary.clone();
             dictionary.set("Parent", page_id);
-            document.objects.insert(*object_id, Object::Dictionary(dictionary));
+            document
+                .objects
+                .insert(*object_id, Object::Dictionary(dictionary));
         }
     }
 
-    let (catalog_id, catalog_object) = catalog_object.ok_or_else(|| anyhow!("Catalog root not found"))?;
+    let (catalog_id, catalog_object) =
+        catalog_object.ok_or_else(|| anyhow!("Catalog root not found"))?;
     if let Ok(dictionary) = page_object.as_dict() {
         let mut dictionary = dictionary.clone();
         dictionary.set("Count", documents_pages.len() as u32);
         dictionary.set(
             "Kids",
-            documents_pages.into_keys().map(Object::Reference).collect::<Vec<_>>(),
+            documents_pages
+                .into_keys()
+                .map(Object::Reference)
+                .collect::<Vec<_>>(),
         );
-        document.objects.insert(page_id, Object::Dictionary(dictionary));
+        document
+            .objects
+            .insert(page_id, Object::Dictionary(dictionary));
     }
     if let Ok(dictionary) = catalog_object.as_dict() {
         let mut dictionary = dictionary.clone();
         dictionary.set("Pages", page_id);
         dictionary.remove(b"Outlines");
-        document.objects.insert(catalog_id, Object::Dictionary(dictionary));
+        document
+            .objects
+            .insert(catalog_id, Object::Dictionary(dictionary));
     }
 
     document.trailer.set("Root", catalog_id);
     document.max_id = document.objects.len() as u32;
     document.renumber_objects();
     document.compress();
-    document.save(output_path).context("Failed to save merged PDF")?;
+    document
+        .save(output_path)
+        .context("Failed to save merged PDF")?;
     Ok(())
 }
 

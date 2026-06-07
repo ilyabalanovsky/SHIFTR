@@ -64,8 +64,10 @@ pub struct ConversionJob {
     pub status: JobStatus,
     pub progress: f32,
     pub speed: Option<String>,
+    pub processing_seconds: Option<u64>,
     pub eta_seconds: Option<u64>,
     pub error: Option<String>,
+    pub error_details: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +86,8 @@ pub struct AdvancedOptions {
     pub video_bitrate: Option<String>,
     pub audio_bitrate: Option<String>,
     pub max_width: Option<u32>,
+    pub frame_rate: Option<u32>,
+    pub target_size_mb: Option<u32>,
     pub image_quality: Option<u8>,
     pub copy_streams: bool,
 }
@@ -173,6 +177,64 @@ pub struct DocumentJobOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RenameOutputOptions {
+    pub id: String,
+    pub output_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeTargetValidationRequest {
+    pub paths: Vec<String>,
+    pub category: FileCategory,
+    pub target_size_mb: u32,
+    pub audio_bitrate: Option<String>,
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeTargetFileEstimate {
+    pub path: String,
+    pub duration_seconds: Option<f64>,
+    pub total_kbps: Option<u32>,
+    pub video_kbps: Option<u32>,
+    pub audio_kbps: Option<u32>,
+    pub applicable: bool,
+    pub warning: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SizeTargetValidation {
+    pub applicable: bool,
+    pub warnings: Vec<String>,
+    pub estimates: Vec<SizeTargetFileEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodingPreset {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub category: FileCategory,
+    pub platform: Option<String>,
+    pub target_format: String,
+    pub preset: ConversionPreset,
+    pub advanced_options: Option<AdvancedOptions>,
+    pub built_in: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EncodingPresetStore {
+    pub schema_version: u32,
+    pub presets: Vec<EncodingPreset>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct QueueUpdate {
     pub job: ConversionJob,
 }
@@ -209,19 +271,22 @@ pub fn default_presets() -> Vec<ConversionPreset> {
     vec![
         ConversionPreset {
             name: "Fast remux".into(),
-            description: "Changes the container without re-encoding when streams are compatible.".into(),
+            description: "Changes the container without re-encoding when streams are compatible."
+                .into(),
             quality_mode: QualityMode::FastRemux,
             overwrite_policy: OverwritePolicy::Rename,
         },
         ConversionPreset {
             name: "Fast encode".into(),
-            description: "Prioritizes speed with moderate compression and broadly compatible codecs.".into(),
+            description:
+                "Prioritizes speed with moderate compression and broadly compatible codecs.".into(),
             quality_mode: QualityMode::FastEncode,
             overwrite_policy: OverwritePolicy::Rename,
         },
         ConversionPreset {
             name: "Balanced".into(),
-            description: "Good default quality, size, and compatibility for everyday conversion.".into(),
+            description: "Good default quality, size, and compatibility for everyday conversion."
+                .into(),
             quality_mode: QualityMode::Balanced,
             overwrite_policy: OverwritePolicy::Rename,
         },
@@ -239,7 +304,8 @@ pub fn default_presets() -> Vec<ConversionPreset> {
         },
         ConversionPreset {
             name: "Keep source quality".into(),
-            description: "Copies streams when possible, otherwise uses conservative quality settings.".into(),
+            description:
+                "Copies streams when possible, otherwise uses conservative quality settings.".into(),
             quality_mode: QualityMode::KeepSource,
             overwrite_policy: OverwritePolicy::Rename,
         },

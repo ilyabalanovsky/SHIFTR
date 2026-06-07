@@ -23,20 +23,29 @@ pub fn get_capabilities(ffmpeg_path: Option<String>) -> ConversionCapabilities {
         Ok(output) => fallback_capabilities(
             false,
             Some(ffmpeg),
-            vec![format!("FFmpeg encoder detection failed with status {}.", output.status)],
+            vec![format!(
+                "FFmpeg encoder detection failed with status {}.",
+                output.status
+            )],
         ),
         Err(error) => fallback_capabilities(false, Some(ffmpeg), vec![error.to_string()]),
     }
 }
 
-pub fn allowed_video_codec_for_format(target_format: &str, requested: Option<&str>) -> &'static str {
+pub fn allowed_video_codec_for_format(
+    target_format: &str,
+    requested: Option<&str>,
+) -> &'static str {
     let allowed = video_codec_ids_for_format(target_format);
     requested
         .and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec))
         .unwrap_or(allowed[0])
 }
 
-pub fn allowed_audio_codec_for_format(target_format: &str, requested: Option<&str>) -> &'static str {
+pub fn allowed_audio_codec_for_format(
+    target_format: &str,
+    requested: Option<&str>,
+) -> &'static str {
     let allowed = audio_codec_ids_for_format(target_format);
     requested
         .and_then(|codec| allowed.iter().copied().find(|allowed| *allowed == codec))
@@ -46,7 +55,18 @@ pub fn allowed_audio_codec_for_format(target_format: &str, requested: Option<&st
 pub fn video_codec_ids_for_format(target_format: &str) -> &'static [&'static str] {
     match target_format {
         "webm" => &["libvpx-vp9", "libvpx", "libaom-av1"],
-        "mp4" | "mkv" | "mov" => &["libx264", "h264_nvenc", "h264_qsv", "h264_amf", "mpeg4", "libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf", "libaom-av1"],
+        "mp4" | "mkv" | "mov" => &[
+            "libx264",
+            "h264_nvenc",
+            "h264_qsv",
+            "h264_amf",
+            "mpeg4",
+            "libx265",
+            "hevc_nvenc",
+            "hevc_qsv",
+            "hevc_amf",
+            "libaom-av1",
+        ],
         "avi" => &["mpeg4", "mjpeg"],
         _ => &["mpeg4"],
     }
@@ -75,24 +95,56 @@ fn capabilities_from_encoders(
     warnings: Vec<String>,
 ) -> ConversionCapabilities {
     let video_ids = [
-        "libx264", "h264_nvenc", "h264_qsv", "h264_amf", "mpeg4", "libx265", "hevc_nvenc", "hevc_qsv", "hevc_amf",
-        "libvpx-vp9", "libvpx", "libaom-av1", "mjpeg",
+        "libx264",
+        "h264_nvenc",
+        "h264_qsv",
+        "h264_amf",
+        "mpeg4",
+        "libx265",
+        "hevc_nvenc",
+        "hevc_qsv",
+        "hevc_amf",
+        "libvpx-vp9",
+        "libvpx",
+        "libaom-av1",
+        "mjpeg",
     ];
-    let audio_ids = ["aac", "libopus", "libvorbis", "flac", "pcm_s16le", "libmp3lame"];
-    let target_formats = ["mp4", "mkv", "mov", "webm", "avi", "mp3", "aac", "m4a", "ogg", "opus", "wav", "flac"];
+    let audio_ids = [
+        "aac",
+        "libopus",
+        "libvorbis",
+        "flac",
+        "pcm_s16le",
+        "libmp3lame",
+    ];
+    let target_formats = [
+        "mp4", "mkv", "mov", "webm", "avi", "mp3", "aac", "m4a", "ogg", "opus", "wav", "flac",
+    ];
 
     ConversionCapabilities {
         ffmpeg_available,
         ffmpeg_path,
         hardware_accels,
-        video_encoders: video_ids.iter().map(|id| codec_option(id, encoders)).collect(),
-        audio_encoders: audio_ids.iter().map(|id| codec_option(id, encoders)).collect(),
+        video_encoders: video_ids
+            .iter()
+            .map(|id| codec_option(id, encoders))
+            .collect(),
+        audio_encoders: audio_ids
+            .iter()
+            .map(|id| codec_option(id, encoders))
+            .collect(),
         matrix: target_formats
             .iter()
             .map(|format| FormatCodecMatrix {
                 target_format: (*format).into(),
-                video_codecs: video_codec_ids_for_format(format).iter().map(|id| codec_option(id, encoders)).collect(),
-                audio_codecs: audio_codec_ids_for_format(format).iter().map(|id| codec_option(id, encoders)).collect(),
+                video_codecs: video_codec_ids_for_format(format)
+                    .iter()
+                    .map(|id| codec_option(id, encoders))
+                    .collect(),
+                audio_codecs: audio_codec_ids_for_format(format)
+                    .iter()
+                    .map(|id| codec_option(id, encoders))
+                    .collect(),
                 supports_video: matches!(*format, "mp4" | "mkv" | "mov" | "webm" | "avi"),
                 supports_audio: true,
                 supports_remux: matches!(*format, "mp4" | "mkv" | "mov" | "webm" | "avi"),
@@ -102,17 +154,25 @@ fn capabilities_from_encoders(
     }
 }
 
-fn fallback_capabilities(ffmpeg_available: bool, ffmpeg_path: Option<String>, warnings: Vec<String>) -> ConversionCapabilities {
-    capabilities_from_encoders(ffmpeg_available, ffmpeg_path, &fallback_encoder_ids(), Vec::new(), warnings)
+fn fallback_capabilities(
+    ffmpeg_available: bool,
+    ffmpeg_path: Option<String>,
+    warnings: Vec<String>,
+) -> ConversionCapabilities {
+    capabilities_from_encoders(
+        ffmpeg_available,
+        ffmpeg_path,
+        &fallback_encoder_ids(),
+        Vec::new(),
+        warnings,
+    )
 }
 
 fn fallback_encoder_ids() -> HashSet<String> {
-    [
-        "mpeg4", "libvpx-vp9", "aac", "libopus", "flac", "pcm_s16le",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect()
+    ["mpeg4", "libvpx-vp9", "aac", "libopus", "flac", "pcm_s16le"]
+        .into_iter()
+        .map(String::from)
+        .collect()
 }
 
 fn codec_option(id: &str, encoders: &HashSet<String>) -> CodecOption {
@@ -120,7 +180,10 @@ fn codec_option(id: &str, encoders: &HashSet<String>) -> CodecOption {
         id: id.into(),
         label: codec_label(id),
         available: encoders.contains(id),
-        hardware: id.contains("_nvenc") || id.contains("_qsv") || id.contains("_amf") || id.contains("videotoolbox"),
+        hardware: id.contains("_nvenc")
+            || id.contains("_qsv")
+            || id.contains("_amf")
+            || id.contains("videotoolbox"),
     }
 }
 
@@ -146,7 +209,8 @@ fn codec_label(id: &str) -> String {
         "pcm_s16le" => "WAV PCM",
         "libmp3lame" => "MP3 LAME",
         _ => id,
-    }.into()
+    }
+    .into()
 }
 
 fn parse_encoder_ids(text: &str) -> HashSet<String> {
@@ -177,7 +241,11 @@ fn find_ffmpeg(configured: Option<String>) -> Option<String> {
         return Some(path);
     }
 
-    let exe = if cfg!(windows) { "ffmpeg.exe" } else { "ffmpeg" };
+    let exe = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
     let bundled = Path::new("resources").join("bin").join(exe);
     if bundled.exists() {
         return Some(bundled.to_string_lossy().to_string());

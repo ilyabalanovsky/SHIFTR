@@ -1,0 +1,166 @@
+name: Build desktop releases
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x64
+            os: windows-latest
+            ffmpeg: windows-gyan
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: --target x86_64-pc-windows-msvc
+
+          - name: linux-x64
+            os: ubuntu-22.04
+            ffmpeg: linux-johnvansickle
+            rust-target: x86_64-unknown-linux-gnu
+            tauri-args: --target x86_64-unknown-linux-gnu
+
+          - name: macos-arm64
+            os: macos-latest
+            ffmpeg: macos-osxexperts
+            rust-target: aarch64-apple-darwin
+            tauri-args: --target aarch64-apple-darwin
+
+          - name: macos15-intel
+            os: macos-15-intel
+            ffmpeg: macos-evermeet
+            rust-target: x86_64-apple-darwin
+            tauri-args: --target x86_64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            librsvg2-dev \
+            libayatana-appindicator3-dev \
+            patchelf
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Prepare FFmpeg resource directory
+        shell: bash
+        run: mkdir -p src-tauri/resources/bin
+
+      - name: Download FFmpeg for Windows
+        if: matrix.ffmpeg == 'windows-gyan'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Invoke-WebRequest `
+            -Uri "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip" `
+            -OutFile "ffmpeg-windows.zip"
+          Expand-Archive "ffmpeg-windows.zip" -DestinationPath "ffmpeg-windows"
+          $binDir = Get-ChildItem "ffmpeg-windows" -Recurse -Filter "ffmpeg.exe" |
+            Select-Object -First 1 -ExpandProperty DirectoryName
+          Copy-Item "$binDir\ffmpeg.exe" "src-tauri\resources\bin\ffmpeg.exe" -Force
+          Copy-Item "$binDir\ffprobe.exe" "src-tauri\resources\bin\ffprobe.exe" -Force
+          .\src-tauri\resources\bin\ffmpeg.exe -version
+          .\src-tauri\resources\bin\ffprobe.exe -version
+
+      - name: Download FFmpeg for Linux
+        if: matrix.ffmpeg == 'linux-johnvansickle'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz" -o ffmpeg-linux.tar.xz
+          mkdir -p ffmpeg-linux
+          tar -xJf ffmpeg-linux.tar.xz -C ffmpeg-linux --strip-components=1
+          cp ffmpeg-linux/ffmpeg src-tauri/resources/bin/ffmpeg
+          cp ffmpeg-linux/ffprobe src-tauri/resources/bin/ffprobe
+          chmod +x src-tauri/resources/bin/ffmpeg src-tauri/resources/bin/ffprobe
+          src-tauri/resources/bin/ffmpeg -version
+          src-tauri/resources/bin/ffprobe -version
+
+      - name: Download FFmpeg for macOS Intel
+        if: matrix.ffmpeg == 'macos-evermeet'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -JL "https://evermeet.cx/ffmpeg/getrelease/ffmpeg/zip" -o ffmpeg-macos.zip
+          curl -JL "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip" -o ffprobe-macos.zip
+          unzip -q ffmpeg-macos.zip -d ffmpeg-macos
+          unzip -q ffprobe-macos.zip -d ffprobe-macos
+          cp "$(find ffmpeg-macos -type f -name ffmpeg | head -n 1)" src-tauri/resources/bin/ffmpeg
+          cp "$(find ffprobe-macos -type f -name ffprobe | head -n 1)" src-tauri/resources/bin/ffprobe
+          chmod +x src-tauri/resources/bin/ffmpeg src-tauri/resources/bin/ffprobe
+          src-tauri/resources/bin/ffmpeg -version
+          src-tauri/resources/bin/ffprobe -version
+
+      - name: Download FFmpeg for macOS Apple Silicon
+        if: matrix.ffmpeg == 'macos-osxexperts'
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -L "https://www.osxexperts.net/ffmpeg80arm.zip" -o ffmpeg-macos-arm64.zip
+          curl -L "https://www.osxexperts.net/ffprobe80arm.zip" -o ffprobe-macos-arm64.zip
+          unzip -q ffmpeg-macos-arm64.zip -d ffmpeg-macos-arm64
+          unzip -q ffprobe-macos-arm64.zip -d ffprobe-macos-arm64
+          cp "$(find ffmpeg-macos-arm64 -type f -name ffmpeg | head -n 1)" src-tauri/resources/bin/ffmpeg
+          cp "$(find ffprobe-macos-arm64 -type f -name ffprobe | head -n 1)" src-tauri/resources/bin/ffprobe
+          chmod +x src-tauri/resources/bin/ffmpeg src-tauri/resources/bin/ffprobe
+          src-tauri/resources/bin/ffmpeg -version
+          src-tauri/resources/bin/ffprobe -version
+
+      - name: Build Tauri bundles
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tauriScript: npm run tauri --
+          args: ${{ matrix.tauri-args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: shiftr-[platform]-[arch]-[bundle]
+
+      - name: Build and publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SHIFTR ${{ github.ref_name }}
+          releaseBody: |
+            SHIFTR desktop builds for Windows, Linux, and macOS.
+
+            FFmpeg/ffprobe binaries are bundled per platform during CI.
+            See README and LICENSE for licensing notes.
+          releaseDraft: true
+          prerelease: false
+          tauriScript: npm run tauri --
+          args: ${{ matrix.tauri-args }}
+          uploadWorkflowArtifacts: true
+          workflowArtifactNamePattern: shiftr-[platform]-[arch]-[bundle]
+          releaseAssetNamePattern: SHIFTR-${{ github.ref_name }}-[platform]-[arch][setup].[ext]

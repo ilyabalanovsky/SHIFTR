@@ -67,7 +67,7 @@ jobs:
             patchelf
 
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install
 
       - name: Prepare FFmpeg resource directory
         shell: bash

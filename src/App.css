@@ -318,6 +318,7 @@ p {
 }
 
 .job-row {
+  position: relative;
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) auto;
   align-items: center;
@@ -328,6 +329,7 @@ p {
   background: rgba(255, 255, 255, 0.03);
   backdrop-filter: blur(30px);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  outline: 0;
 }
 
 .job-row.running {
@@ -574,6 +576,120 @@ p {
 .job-actions {
   display: flex;
   gap: 4px;
+}
+
+.job-tooltip {
+  position: fixed;
+  z-index: 1000;
+  width: min(380px, calc(100vw - 32px));
+  overflow: visible;
+  pointer-events: none;
+  animation: tooltip-in 0.16s ease both;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 10px;
+  padding: 10px;
+  color: #e5e2e1;
+  background:
+    radial-gradient(circle at 92% 10%, rgba(20, 209, 255, 0.12), transparent 32%),
+    rgba(28, 27, 27, 0.98);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(28px);
+}
+
+.job-tooltip::before {
+  content: "";
+  position: absolute;
+  top: -6px;
+  left: 18px;
+  width: 10px;
+  height: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.14);
+  border-left: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(28, 27, 27, 0.98);
+  transform: rotate(45deg);
+}
+
+.job-tooltip.above::before {
+  top: auto;
+  bottom: -6px;
+  border-top: 0;
+  border-left: 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.14);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+@keyframes tooltip-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.job-tooltip-head {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.job-tooltip-head span {
+  color: #14d1ff;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.job-tooltip-head strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-tooltip dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin: 0;
+}
+
+.job-tooltip dl div {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.job-tooltip dt {
+  flex: 0 0 auto;
+  color: #b9cbbd;
+  font-size: 9px;
+  font-weight: 750;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.job-tooltip dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #e5e2e1;
+  font-size: 11px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 .icon-button {
@@ -951,6 +1067,105 @@ input:focus {
   width: min(760px, calc(100vw - 48px));
 }
 
+.onboarding-modal {
+  display: flex;
+  width: min(860px, calc(100vw - 48px));
+  max-height: min(620px, calc(100vh - 48px));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 18px;
+  background:
+    radial-gradient(circle at 20% 12%, rgba(83, 255, 171, 0.13), transparent 34%),
+    radial-gradient(circle at 82% 18%, rgba(20, 209, 255, 0.13), transparent 34%),
+    rgba(28, 27, 27, 0.98);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.58);
+}
+
+.onboarding-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+  padding: 18px;
+}
+
+.onboarding-card {
+  position: relative;
+  display: flex;
+  min-height: 230px;
+  flex-direction: column;
+  justify-content: flex-end;
+  overflow: hidden;
+  gap: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 12px;
+  padding: 16px;
+  color: #e5e2e1;
+  background: rgba(19, 19, 19, 0.66);
+  text-align: left;
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.onboarding-card::before {
+  content: "";
+  position: absolute;
+  inset: -60px -40px auto auto;
+  width: 140px;
+  height: 140px;
+  border-radius: 999px;
+  background: rgba(20, 209, 255, 0.14);
+  filter: blur(8px);
+  transition: transform 0.28s ease;
+}
+
+.onboarding-card.aware::before {
+  background: rgba(83, 255, 171, 0.16);
+}
+
+.onboarding-card.fluent::before {
+  background: rgba(255, 206, 146, 0.16);
+}
+
+.onboarding-card:hover {
+  transform: translateY(-4px);
+  border-color: rgba(20, 209, 255, 0.34);
+  background: rgba(20, 209, 255, 0.06);
+}
+
+.onboarding-card:hover::before {
+  transform: translate(-16px, 18px) scale(1.08);
+}
+
+.onboarding-card span {
+  position: relative;
+  color: #14d1ff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.onboarding-card.aware span {
+  color: #53ffab;
+}
+
+.onboarding-card.fluent span {
+  color: #ffce92;
+}
+
+.onboarding-card strong {
+  position: relative;
+  font-size: 26px;
+  letter-spacing: -0.03em;
+}
+
+.onboarding-card p {
+  position: relative;
+  color: #b9cbbd;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .presets-body {
   display: flex;
   max-height: 560px;
@@ -1141,6 +1356,12 @@ input:focus {
   overflow: visible;
 }
 
+.recipe-first {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
 .advanced-toggle {
   display: flex;
   width: max-content;
@@ -1325,6 +1546,11 @@ input:focus {
   }
 
   .modal-body {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-grid,
+  .preset-grid {
     grid-template-columns: 1fr;
   }
 }

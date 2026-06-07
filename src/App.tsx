@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
@@ -34,6 +34,7 @@ type QualityMode = 'fastRemux' | 'fastEncode' | 'smallSize' | 'balanced' | 'high
 type OverwritePolicy = 'rename' | 'overwrite'
 type AppMode = 'media' | 'documents'
 type DocumentOperation = 'imagesToPdf' | 'mergePdfs'
+type UserLevel = 'aware' | 'capable' | 'fluent'
 type ReleaseStatus = {
   latestVersion: string | null
   updateAvailable: boolean
@@ -105,6 +106,13 @@ type SizeTargetValidation = {
   }>
 }
 
+type JobTooltipState = {
+  jobId: string
+  left: number
+  top: number
+  placement: 'below' | 'above'
+}
+
 type SupportedFormats = {
   video: string[]
   audio: string[]
@@ -150,6 +158,7 @@ type BatchGroup = {
   targetFormat: string
   presetName: string
   presetOverride: ConversionPreset | null
+  encodingPresetId: string | null
   advancedOpen: boolean
   advancedOptions: AdvancedOptions | null
 }
@@ -245,10 +254,14 @@ const frameRates = ['Same as source', '24', '25', '30', '50', '60', '120']
 const targetSizes = ['Keep auto', '8', '10', '25', '50', '100', '250', '500', '1024', 'Custom...']
 const fixedTargetSizes = [8, 10, 25, 50, 100, 250, 500, 1024]
 const qualityLevels = ['20', '40', '60', '80', '95']
+const userLevelStorageKey = 'shiftr.userLevel'
+const jobTooltipDelayMs = 1500
 const appVersion = __APP_VERSION__
 const githubReleasesRepo = __GITHUB_RELEASES_REPO__
 
 function App() {
+  const [userLevel, setUserLevelState] = useState<UserLevel>(() => storedUserLevel() ?? 'capable')
+  const [isOnboardingOpen, setIsOnboardingOpen] = useState(() => storedUserLevel() === null)
   const [activeMode, setActiveMode] = useState<AppMode>('media')
   const [formats, setFormats] = useState<SupportedFormats>(fallbackFormats)
   const [capabilities, setCapabilities] = useState<ConversionCapabilities>(fallbackCapabilities)
@@ -275,6 +288,8 @@ function App() {
   const [expandedErrorIds, setExpandedErrorIds] = useState<string[]>([])
   const [customSizeCategories, setCustomSizeCategories] = useState<MediaCategory[]>([])
   const [sizeTargetValidation, setSizeTargetValidation] = useState<{ key: string; value: SizeTargetValidation } | null>(null)
+  const [jobTooltip, setJobTooltip] = useState<JobTooltipState | null>(null)
+  const jobTooltipTimerRef = useRef<number | null>(null)
 
   const selectedPreset = useMemo(
     () => formats.presets.find((preset) => preset.name === presetName) ?? formats.presets[0] ?? fallbackPreset,
@@ -311,6 +326,7 @@ function App() {
   const activeGroup = batchGroups[activeGroupIndex]
   const isBatchModalOpen = batchGroups.length > 0
   const isDocumentModalOpen = documentSetup !== null
+  const tooltipJob = jobTooltip ? jobs.find((job) => job.id === jobTooltip.jobId) : null
 
   const queueOptions = useCallback(() => ({
     outputDir: outputDir || null,
@@ -320,6 +336,8 @@ function App() {
     parallelism,
     ffmpegPath: ffmpegPath || null,
   }), [ffmpegPath, outputDir, parallelism, selectedPreset, targetFormat])
+
+  useEffect(() => () => clearJobTooltipTimer(), [])
 
   useEffect(() => {
     invoke<SupportedFormats>('get_supported_formats')
@@ -451,16 +469,22 @@ function App() {
 
     return (['video', 'audio', 'image'] as const)
       .filter((category) => buckets[category].length > 0)
-      .map((category) => ({
-        category,
-        paths: buckets[category],
-        targetFormat: preferredTarget(category),
-        presetName,
-        presetOverride: null,
-        advancedOpen: false,
-        advancedOptions: null,
-      }))
-  }, [categoryForPath, preferredTarget, presetName])
+      .map((category) => {
+        const recipe = userLevel === 'aware'
+          ? compatibleEncodingPresets(encodingPresets, category)[0]
+          : undefined
+        return {
+          category,
+          paths: buckets[category],
+          targetFormat: recipe?.targetFormat ?? preferredTarget(category),
+          presetName: recipe?.preset.name ?? presetName,
+          presetOverride: recipe?.preset ?? null,
+          encodingPresetId: recipe?.id ?? null,
+          advancedOpen: userLevel === 'fluent',
+          advancedOptions: recipe?.advancedOptions ?? (userLevel === 'fluent' ? null : null),
+        }
+      })
+  }, [categoryForPath, encodingPresets, preferredTarget, presetName, userLevel])
 
   const addMediaPaths = useCallback(async (paths: string[]) => {
     if (!paths.length) return
@@ -632,7 +656,7 @@ function App() {
     setCompletedGroupIndexes([])
   }
 
-  function updateActiveGroup(update: Partial<Pick<BatchGroup, 'targetFormat' | 'presetName' | 'presetOverride' | 'advancedOpen' | 'advancedOptions'>>) {
+  function updateActiveGroup(update: Partial<Pick<BatchGroup, 'targetFormat' | 'presetName' | 'presetOverride' | 'encodingPresetId' | 'advancedOpen' | 'advancedOptions'>>) {
     setBatchGroups((current) =>
       current.map((group, index) => index === activeGroupIndex ? { ...group, ...update } : group),
     )
@@ -811,7 +835,63 @@ function App() {
     )
   }
 
+  function clearJobTooltipTimer() {
+    if (jobTooltipTimerRef.current !== null) {
+      window.clearTimeout(jobTooltipTimerRef.current)
+      jobTooltipTimerRef.current = null
+    }
+  }
+
+  function scheduleJobTooltip(jobId: string, element: HTMLElement) {
+    clearJobTooltipTimer()
+    jobTooltipTimerRef.current = window.setTimeout(() => {
+      jobTooltipTimerRef.current = null
+      if (element.isConnected) {
+        showJobTooltip(jobId, element)
+      }
+    }, jobTooltipDelayMs)
+  }
+
+  function showJobTooltip(jobId: string, element: HTMLElement) {
+    const rect = element.getBoundingClientRect()
+    const width = Math.min(380, window.innerWidth - 32)
+    const estimatedHeight = 210
+    const left = Math.min(Math.max(rect.left + 58, 16), Math.max(16, window.innerWidth - width - 16))
+    const hasRoomBelow = rect.bottom + estimatedHeight + 18 <= window.innerHeight
+    const top = hasRoomBelow
+      ? Math.min(rect.bottom + 10, window.innerHeight - estimatedHeight - 16)
+      : Math.max(16, rect.top - estimatedHeight - 10)
+
+    setJobTooltip({
+      jobId,
+      left,
+      top,
+      placement: hasRoomBelow ? 'below' : 'above',
+    })
+  }
+
+  function hideJobTooltip() {
+    clearJobTooltipTimer()
+    setJobTooltip(null)
+  }
+
+  function setUserLevel(level: UserLevel) {
+    localStorage.setItem(userLevelStorageKey, level)
+    setUserLevelState(level)
+    setIsOnboardingOpen(false)
+    setBatchGroups((current) =>
+      current.map((group) => ({
+        ...group,
+        advancedOpen: level === 'fluent' ? true : level === 'aware' ? false : group.advancedOpen,
+      })),
+    )
+  }
+
   function applyEncodingPreset(preset: EncodingPreset) {
+    applyEncodingPresetToBatch(preset, true)
+  }
+
+  function applyEncodingPresetToBatch(preset: EncodingPreset, closePresets: boolean) {
     const compatibleGroupIndex = activeGroup?.category === preset.category
       ? activeGroupIndex
       : batchGroups.findIndex((group) => group.category === preset.category)
@@ -828,13 +908,14 @@ function App() {
           targetFormat: preset.targetFormat,
           presetName: preset.preset.name,
           presetOverride: preset.preset,
+          encodingPresetId: preset.id,
           advancedOpen: Boolean(preset.advancedOptions),
           advancedOptions: preset.advancedOptions ?? null,
         }
         : group),
     )
     setActiveGroupIndex(compatibleGroupIndex)
-    setIsPresetsOpen(false)
+    if (closePresets) setIsPresetsOpen(false)
     setLastError(null)
   }
 
@@ -982,7 +1063,15 @@ function App() {
             </div>
           ) : (
             jobs.map((job) => (
-              <article className={`job-row ${job.status}`} key={job.id}>
+              <article
+                className={`job-row ${job.status}`}
+                key={job.id}
+                onBlur={hideJobTooltip}
+                onFocus={(event) => scheduleJobTooltip(job.id, event.currentTarget)}
+                onMouseEnter={(event) => scheduleJobTooltip(job.id, event.currentTarget)}
+                onMouseLeave={hideJobTooltip}
+                tabIndex={0}
+              >
                 <div className="job-icon">{iconFor(job.category)}</div>
                 <div className="job-main">
                   <div className="job-title">
@@ -1083,6 +1172,30 @@ function App() {
         </section>
       </section>
 
+      {tooltipJob && jobTooltip && (
+        <div
+          className={`job-tooltip ${jobTooltip.placement}`}
+          role="tooltip"
+          style={{
+            left: jobTooltip.left,
+            top: jobTooltip.top,
+          }}
+        >
+          <div className="job-tooltip-head">
+            <span>{fileCategoryLabel(tooltipJob.category)} setup</span>
+            <strong>{jobTitle(tooltipJob)}</strong>
+          </div>
+          <dl>
+            {jobSettingsRows(tooltipJob).map((row) => (
+              <div key={row.label}>
+                <dt>{row.label}</dt>
+                <dd title={row.value}>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </div>
+      )}
+
       <aside className="control-panel">
         <div className="engine-head">
           <h2>Conversion Engine</h2>
@@ -1153,41 +1266,65 @@ function App() {
             <div className="modal-body">
               <section className="modal-section">
                 <h3><SlidersHorizontal size={16} /> {categoryLabel(activeGroup.category)} conversion</h3>
-                <label>
-                  Target Format
-                  <CustomSelect
-                    value={activeGroup.targetFormat}
-                    options={formats[activeGroup.category].map((format) => ({ value: format, label: `.${format}` }))}
-                    onChange={(value) => updateActiveGroup({
-                      targetFormat: value,
-                      advancedOptions: sanitizeAdvancedForFormat(activeGroup, value),
-                    })}
-                  />
-                </label>
-                <label>
-                  Preset
-                  <CustomSelect
-                    value={activeGroup.presetName}
-                    options={presetSelectOptions(activeGroup, formats)}
-                    onChange={(value) => updateActiveGroup({ presetName: value, presetOverride: null })}
-                  />
-                </label>
-                <p className="preset-description">{activeGroup.presetOverride?.description ?? presetByName(activeGroup.presetName).description}</p>
-                <div className="advanced-disclosure">
-                  <button
-                    className="advanced-toggle"
-                    type="button"
-                    onClick={() => updateActiveGroup({
-                      advancedOpen: !activeGroup.advancedOpen,
-                      advancedOptions: ensureAdvancedOptions(activeGroup),
-                    })}
-                  >
-                    <span>Advanced options</span>
-                    <ChevronDown size={17} />
-                  </button>
-                  {activeGroup.advancedOpen && (
-                    <div className="advanced-content">
-                      <p>For experienced users. These values override the selected preset and are filtered for the chosen output format.</p>
+                {userLevel === 'aware' ? (
+                  <div className="recipe-first">
+                    <label>
+                      Ready-made recipe
+                      <CustomSelect
+                        value={activeGroup.encodingPresetId ?? compatibleEncodingPresets(encodingPresets, activeGroup.category)[0]?.id ?? ''}
+                        options={compatibleEncodingPresets(encodingPresets, activeGroup.category).map((preset) => ({ value: preset.id, label: `${preset.name} · .${preset.targetFormat}` }))}
+                        onChange={(value) => {
+                          const recipe = encodingPresets.find((preset) => preset.id === value)
+                          if (recipe) applyEncodingPresetToBatch(recipe, false)
+                        }}
+                      />
+                    </label>
+                    <p className="preset-description">
+                      {activeRecipe(activeGroup, encodingPresets)?.description ?? 'Choose a recipe and SHIFTR will handle format, codec, quality, and size settings.'}
+                    </p>
+                    <button className="secondary-wide" type="button" onClick={() => setIsPresetsOpen(true)}>
+                      Browse all recipes
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <label>
+                      Target Format
+                      <CustomSelect
+                        value={activeGroup.targetFormat}
+                        options={formats[activeGroup.category].map((format) => ({ value: format, label: `.${format}` }))}
+                        onChange={(value) => updateActiveGroup({
+                          targetFormat: value,
+                          encodingPresetId: null,
+                          presetOverride: null,
+                          advancedOptions: sanitizeAdvancedForFormat(activeGroup, value),
+                        })}
+                      />
+                    </label>
+                    <label>
+                      Preset
+                      <CustomSelect
+                        value={activeGroup.presetName}
+                        options={presetSelectOptions(activeGroup, formats)}
+                        onChange={(value) => updateActiveGroup({ presetName: value, presetOverride: null, encodingPresetId: null })}
+                      />
+                    </label>
+                    <p className="preset-description">{activeGroup.presetOverride?.description ?? presetByName(activeGroup.presetName).description}</p>
+                    <div className="advanced-disclosure">
+                      <button
+                        className="advanced-toggle"
+                        type="button"
+                        onClick={() => updateActiveGroup({
+                          advancedOpen: !activeGroup.advancedOpen,
+                          advancedOptions: ensureAdvancedOptions(activeGroup),
+                        })}
+                      >
+                        <span>Advanced options</span>
+                        <ChevronDown size={17} />
+                      </button>
+                      {activeGroup.advancedOpen && (
+                        <div className="advanced-content">
+                          <p>For experienced users. These values override the selected preset and are filtered for the chosen output format.</p>
                       {activeGroup.category !== 'image' && (
                         <label className="toggle-row">
                           <span>Copy streams / remux</span>
@@ -1306,9 +1443,11 @@ function App() {
                           />
                         </label>
                       )}
+                        </div>
+                      )}
                     </div>
-                  )}
-                </div>
+                  </>
+                )}
               </section>
 
               <section className="modal-section">
@@ -1480,6 +1619,34 @@ function App() {
         </div>
       )}
 
+      {isOnboardingOpen && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="onboarding-modal" role="dialog" aria-modal="true" aria-labelledby="onboarding-title">
+            <header className="modal-head">
+              <div>
+                <p>First run</p>
+                <h2 id="onboarding-title">How hands-on do you want SHIFTR to be?</h2>
+              </div>
+            </header>
+
+            <div className="onboarding-grid">
+              {(['aware', 'capable', 'fluent'] as const).map((level) => (
+                <button
+                  className={`onboarding-card ${level}`}
+                  key={level}
+                  onClick={() => setUserLevel(level)}
+                  type="button"
+                >
+                  <span>{userLevelEyebrow(level)}</span>
+                  <strong>{userLevelTitle(level)}</strong>
+                  <p>{userLevelDescription(level)}</p>
+                </button>
+              ))}
+            </div>
+          </section>
+        </div>
+      )}
+
       {isSettingsOpen && (
         <div className="modal-backdrop" role="presentation">
           <section className="settings-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
@@ -1494,6 +1661,20 @@ function App() {
             </header>
 
             <div className="settings-body">
+              <section className="modal-section">
+                <h3><SlidersHorizontal size={16} /> Experience level</h3>
+                <CustomSelect
+                  value={userLevel}
+                  options={[
+                    { value: 'aware', label: 'Aware' },
+                    { value: 'capable', label: 'Capable' },
+                    { value: 'fluent', label: 'Fluent' },
+                  ]}
+                  onChange={(value) => setUserLevel(value as UserLevel)}
+                />
+                <p className="preset-description">{userLevelDescription(userLevel)}</p>
+              </section>
+
               <section className="modal-section">
                 <h3><Cpu size={16} /> Engine</h3>
                 {capabilities.warnings.length > 0 && (
@@ -1605,8 +1786,128 @@ function isMediaCategory(category: FileCategory): category is MediaCategory {
   return category === 'video' || category === 'audio' || category === 'image'
 }
 
+function storedUserLevel(): UserLevel | null {
+  const value = localStorage.getItem(userLevelStorageKey)
+  return value === 'aware' || value === 'capable' || value === 'fluent' ? value : null
+}
+
+function userLevelTitle(level: UserLevel) {
+  if (level === 'aware') return 'Aware'
+  if (level === 'fluent') return 'Fluent'
+  return 'Capable'
+}
+
+function userLevelEyebrow(level: UserLevel) {
+  if (level === 'aware') return 'Preset guided'
+  if (level === 'fluent') return 'Full control'
+  return 'Hands-on'
+}
+
+function userLevelDescription(level: UserLevel) {
+  if (level === 'aware') {
+    return 'Use ready-made recipes, import shared presets, and let SHIFTR choose the technical settings.'
+  }
+  if (level === 'fluent') {
+    return 'Open advanced controls by default and tune codecs, bitrate, frame rate, size targets, and more.'
+  }
+  return 'Choose formats and quality presets yourself, with advanced controls available when you need them.'
+}
+
+function compatibleEncodingPresets(presets: EncodingPreset[], category: MediaCategory) {
+  return presets.filter((preset) => preset.category === category)
+}
+
+function activeRecipe(group: BatchGroup, presets: EncodingPreset[]) {
+  return presets.find((preset) => preset.id === group.encodingPresetId)
+}
+
 function jobTitle(job: ConversionJob) {
   return fileName(job.outputPath)
+}
+
+function jobSettingsRows(job: ConversionJob) {
+  const options = job.advancedOptions
+  const rows = [
+    { label: 'Format', value: `.${job.sourceFormat || 'unknown'} -> .${job.targetFormat}` },
+    { label: 'Preset', value: `${job.preset.name} · ${qualityModeLabel(job.preset.qualityMode)}` },
+  ]
+
+  if (job.category === 'video') {
+    rows.push(
+      { label: 'Video', value: compactCodecValue(options?.copyStreams, options?.videoCodec) },
+      { label: 'Audio', value: compactCodecValue(options?.copyStreams, options?.audioCodec) },
+      { label: 'Quality', value: options?.videoQuality ? qualityLabel(options.videoQuality) : 'Preset decides' },
+      { label: 'Limits', value: compactVideoLimits(options) },
+      { label: 'Size', value: options?.targetSizeMb ? formatTargetSize(options.targetSizeMb) : 'Keep auto' },
+    )
+  } else if (job.category === 'audio') {
+    rows.push(
+      { label: 'Audio', value: compactCodecValue(options?.copyStreams, options?.audioCodec) },
+      { label: 'Bitrate', value: options?.targetSizeMb ? 'From size target' : options?.audioBitrate ?? 'Preset decides' },
+      { label: 'Size', value: options?.targetSizeMb ? formatTargetSize(options.targetSizeMb) : 'Keep auto' },
+    )
+  } else if (job.category === 'image') {
+    rows.push(
+      { label: 'Quality', value: options?.imageQuality ? qualityLabel(options.imageQuality) : 'Preset decides' },
+    )
+  } else if (job.category === 'document') {
+    rows.push(
+      { label: 'Operation', value: documentJobLabel(job.documentOperation) },
+      { label: 'Inputs', value: `${job.inputPaths.length} file${job.inputPaths.length === 1 ? '' : 's'}` },
+    )
+  }
+
+  rows.push({ label: 'Status', value: compactJobTiming(job) })
+
+  return rows
+}
+
+function compactCodecValue(copyStreams?: boolean | null, codec?: string | null) {
+  if (copyStreams) return 'Copy source'
+  return codec || 'Preset decides'
+}
+
+function compactVideoLimits(options?: AdvancedOptions | null) {
+  const limits = []
+  if (options?.maxWidth) limits.push(`${options.maxWidth}px`)
+  if (options?.frameRate) limits.push(`${options.frameRate} fps`)
+  return limits.length > 0 ? limits.join(' · ') : 'Original'
+}
+
+function compactJobTiming(job: ConversionJob) {
+  const elapsed = job.processingSeconds != null ? formatProcessingTime(job.processingSeconds) : null
+  if (job.status === 'running' && job.etaSeconds != null) {
+    return `${elapsed ?? 'Running'} · ETA ${formatProcessingTime(job.etaSeconds)}`
+  }
+  if (elapsed) return `${job.status} · ${elapsed}`
+  return job.status
+}
+
+function fileCategoryLabel(category: FileCategory) {
+  if (category === 'video') return 'Video'
+  if (category === 'audio') return 'Audio'
+  if (category === 'image') return 'Image'
+  if (category === 'document') return 'Document'
+  return 'File'
+}
+
+function qualityModeLabel(mode: QualityMode) {
+  if (mode === 'fastRemux') return 'Fast remux'
+  if (mode === 'fastEncode') return 'Fast encode'
+  if (mode === 'smallSize') return 'Small size'
+  if (mode === 'highQuality') return 'High quality'
+  if (mode === 'keepSource') return 'Keep source quality'
+  return 'Balanced'
+}
+
+function formatTargetSize(sizeMb: number) {
+  return sizeMb >= 1024 ? `${Math.round(sizeMb / 1024)} GB` : `${sizeMb} MB`
+}
+
+function documentJobLabel(operation?: DocumentOperation | null) {
+  if (operation === 'imagesToPdf') return 'Images to PDF'
+  if (operation === 'mergePdfs') return 'Merge PDFs'
+  return 'Document task'
 }
 
 function formatProcessingTime(seconds: number) {

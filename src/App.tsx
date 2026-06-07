@@ -1,16 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { invoke } from '@tauri-apps/api/core'
+import { convertFileSrc, invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { getCurrentWebview } from '@tauri-apps/api/webview'
-import { open } from '@tauri-apps/plugin-dialog'
+import { open, save } from '@tauri-apps/plugin-dialog'
 import {
   AlertCircle,
   Bell,
+  BookOpenCheck,
   Check,
   ChevronDown,
   Clock3,
   CloudUpload,
   Cpu,
+  Download,
   FileAudio,
   FileText,
   FileImage,
@@ -21,7 +23,6 @@ import {
   Pencil,
   Play,
   RotateCcw,
-  Search,
   Settings2,
   SlidersHorizontal,
   X,
@@ -97,6 +98,9 @@ type SizeTargetValidation = {
   warnings: string[]
   estimates: Array<{
     path: string
+    sourceSizeBytes?: number | null
+    estimatedOutputSizeBytes?: number | null
+    estimatedDeltaBytes?: number | null
     durationSeconds?: number | null
     totalKbps?: number | null
     videoKbps?: number | null
@@ -129,6 +133,16 @@ type CodecOption = {
   hardware: boolean
 }
 
+type CompatibilityRating = 'Excellent' | 'High' | 'Medium' | 'Low'
+
+type CompatibilityProfile = {
+  web: CompatibilityRating
+  apple: CompatibilityRating
+  windows: CompatibilityRating
+  size: CompatibilityRating
+  quality: CompatibilityRating
+}
+
 type FormatCodecMatrix = {
   targetFormat: string
   videoCodecs: CodecOption[]
@@ -142,6 +156,7 @@ type ConversionCapabilities = {
   ffmpegAvailable: boolean
   ffmpegPath?: string | null
   hardwareAccels: string[]
+  hardwareDevices: string[]
   videoEncoders: CodecOption[]
   audioEncoders: CodecOption[]
   matrix: FormatCodecMatrix[]
@@ -150,6 +165,42 @@ type ConversionCapabilities = {
 
 type QueueUpdate = {
   job: ConversionJob
+}
+
+type PreviewResult = {
+  inputPath: string
+  previewPath: string
+  waveformPath?: string | null
+  durationSeconds?: number | null
+  previewSeconds: number
+  sourceSizeBytes?: number | null
+  previewSizeBytes?: number | null
+  estimatedOutputSizeBytes?: number | null
+  estimatedDeltaBytes?: number | null
+}
+
+type PreviewState = {
+  key: string | null
+  loading: boolean
+  error: string | null
+  result: PreviewResult | null
+}
+
+type OutputSizeEstimate = {
+  sourceSizeBytes?: number | null
+  estimatedMinBytes?: number | null
+  estimatedMaxBytes?: number | null
+  estimatedOutputSizeBytes?: number | null
+  estimatedDeltaBytes?: number | null
+  confidence: string
+  basis: string
+}
+
+type OutputSizeEstimateState = {
+  key: string | null
+  loading: boolean
+  error: string | null
+  result: OutputSizeEstimate | null
 }
 
 type BatchGroup = {
@@ -236,6 +287,7 @@ const fallbackCapabilities: ConversionCapabilities = {
   ffmpegAvailable: false,
   ffmpegPath: null,
   hardwareAccels: [],
+  hardwareDevices: [],
   videoEncoders: [],
   audioEncoders: [],
   matrix: [],
@@ -255,6 +307,7 @@ const targetSizes = ['Keep auto', '8', '10', '25', '50', '100', '250', '500', '1
 const fixedTargetSizes = [8, 10, 25, 50, 100, 250, 500, 1024]
 const qualityLevels = ['20', '40', '60', '80', '95']
 const userLevelStorageKey = 'shiftr.userLevel'
+const previewEnabledStorageKey = 'shiftr.previewEnabled'
 const jobTooltipDelayMs = 1500
 const appVersion = __APP_VERSION__
 const githubReleasesRepo = __GITHUB_RELEASES_REPO__
@@ -273,11 +326,12 @@ function App() {
   const [ffmpegPath, setFfmpegPath] = useState('')
   const [isRunning, setIsRunning] = useState(false)
   const [dragActive, setDragActive] = useState(false)
+  const [recipeImportActive, setRecipeImportActive] = useState(false)
   const [lastError, setLastError] = useState<string | null>(null)
   const [isSettingsOpen, setIsSettingsOpen] = useState(false)
   const [isPresetsOpen, setIsPresetsOpen] = useState(false)
   const [encodingPresets, setEncodingPresets] = useState<EncodingPreset[]>([])
-  const [customPresetName, setCustomPresetName] = useState('')
+  const [newRecipeDraft, setNewRecipeDraft] = useState<{ name: string; description: string } | null>(null)
   const [batchGroups, setBatchGroups] = useState<BatchGroup[]>([])
   const [activeGroupIndex, setActiveGroupIndex] = useState(0)
   const [completedGroupIndexes, setCompletedGroupIndexes] = useState<number[]>([])
@@ -289,6 +343,9 @@ function App() {
   const [customSizeCategories, setCustomSizeCategories] = useState<MediaCategory[]>([])
   const [sizeTargetValidation, setSizeTargetValidation] = useState<{ key: string; value: SizeTargetValidation } | null>(null)
   const [jobTooltip, setJobTooltip] = useState<JobTooltipState | null>(null)
+  const [previewEnabled, setPreviewEnabled] = useState(() => storedPreviewEnabled())
+  const [previewState, setPreviewState] = useState<PreviewState>({ key: null, loading: false, error: null, result: null })
+  const [outputSizeEstimate, setOutputSizeEstimate] = useState<OutputSizeEstimateState>({ key: null, loading: false, error: null, result: null })
   const jobTooltipTimerRef = useRef<number | null>(null)
 
   const selectedPreset = useMemo(
@@ -327,6 +384,13 @@ function App() {
   const isBatchModalOpen = batchGroups.length > 0
   const isDocumentModalOpen = documentSetup !== null
   const tooltipJob = jobTooltip ? jobs.find((job) => job.id === jobTooltip.jobId) : null
+  const activePreviewKey = activeGroup ? batchPreviewKey(activeGroup) : null
+  const visiblePreviewState = previewState.key === activePreviewKey
+    ? previewState
+    : { key: activePreviewKey, loading: false, error: null, result: null }
+  const visibleOutputSizeEstimate = outputSizeEstimate.key === activePreviewKey
+    ? outputSizeEstimate
+    : { key: activePreviewKey, loading: false, error: null, result: null }
 
   const queueOptions = useCallback(() => ({
     outputDir: outputDir || null,
@@ -338,6 +402,10 @@ function App() {
   }), [ffmpegPath, outputDir, parallelism, selectedPreset, targetFormat])
 
   useEffect(() => () => clearJobTooltipTimer(), [])
+
+  useEffect(() => {
+    localStorage.setItem(previewEnabledStorageKey, previewEnabled ? 'true' : 'false')
+  }, [previewEnabled])
 
   useEffect(() => {
     invoke<SupportedFormats>('get_supported_formats')
@@ -453,6 +521,34 @@ function App() {
     return formats.presets.find((preset) => preset.name === name) ?? formats.presets[0] ?? fallbackPreset
   }, [formats.presets])
 
+  useEffect(() => {
+    if (!activeGroup || !['video', 'audio'].includes(activeGroup.category)) {
+      return
+    }
+
+    const key = batchPreviewKey(activeGroup)
+    let canceled = false
+    invoke<OutputSizeEstimate>('estimate_output_size', {
+      request: {
+        paths: activeGroup.paths,
+        category: activeGroup.category,
+        targetFormat: activeGroup.targetFormat,
+        preset: activeGroup.presetOverride ?? presetByName(activeGroup.presetName),
+        advancedOptions: activeGroup.advancedOptions,
+      },
+    })
+      .then((estimate) => {
+        if (!canceled) setOutputSizeEstimate({ key, loading: false, error: null, result: estimate })
+      })
+      .catch((error) => {
+        if (!canceled) setOutputSizeEstimate({ key, loading: false, error: String(error), result: null })
+      })
+
+    return () => {
+      canceled = true
+    }
+  }, [activeGroup, presetByName])
+
   const buildBatchGroups = useCallback((paths: string[]): BatchGroup[] => {
     const buckets: Record<MediaCategory, string[]> = {
       video: [],
@@ -532,24 +628,58 @@ function App() {
     }
   }, [activeMode, addDocumentPaths, addMediaPaths])
 
+  const importRecipeFiles = useCallback(async (paths: string[]) => {
+    const jsonPaths = paths.filter((path) => extension(path) === 'json')
+    if (!jsonPaths.length) {
+      setLastError('Drop or choose a .json recipe file.')
+      return
+    }
+
+    try {
+      let updated = encodingPresets
+      for (const path of jsonPaths) {
+        updated = await invoke<EncodingPreset[]>('import_custom_encoding_presets', { path })
+      }
+      setEncodingPresets(updated)
+      setRecipeImportActive(false)
+      setLastError(null)
+    } catch (error) {
+      setRecipeImportActive(false)
+      setLastError(String(error))
+    }
+  }, [encodingPresets])
+
   useEffect(() => {
     const unlistenPromise = getCurrentWebview().onDragDropEvent((event) => {
-      if (event.payload.type === 'enter' || event.payload.type === 'over') {
+      if (event.payload.type === 'enter') {
+        if (isPresetsOpen) {
+          setRecipeImportActive(event.payload.paths.some((path) => extension(path) === 'json'))
+        } else {
+          setDragActive(true)
+        }
+      }
+      if (event.payload.type === 'over' && !isPresetsOpen) {
         setDragActive(true)
       }
       if (event.payload.type === 'leave') {
         setDragActive(false)
+        setRecipeImportActive(false)
       }
       if (event.payload.type === 'drop') {
         setDragActive(false)
-        void addPaths(event.payload.paths)
+        setRecipeImportActive(false)
+        if (isPresetsOpen && event.payload.paths.some((path) => extension(path) === 'json')) {
+          void importRecipeFiles(event.payload.paths)
+        } else {
+          void addPaths(event.payload.paths)
+        }
       }
     })
 
     return () => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => undefined)
     }
-  }, [addPaths])
+  }, [addPaths, importRecipeFiles, isPresetsOpen])
 
   async function chooseFiles() {
     const selected = await open({
@@ -596,6 +726,31 @@ function App() {
     const selected = await open({ multiple: false })
     if (typeof selected === 'string') {
       setFfmpegPath(selected)
+    }
+  }
+
+  async function renderPreview() {
+    if (!activeGroup || !['video', 'audio'].includes(activeGroup.category)) return
+    const path = activeGroup.paths[0]
+    if (!path) return
+    const key = batchPreviewKey(activeGroup)
+
+    setPreviewState({ key, loading: true, error: null, result: null })
+    try {
+      const result = await invoke<PreviewResult>('create_conversion_preview', {
+        request: {
+          path,
+          category: activeGroup.category,
+          sourceFormat: extension(path),
+          targetFormat: activeGroup.targetFormat,
+          preset: activeGroup.presetOverride ?? presetByName(activeGroup.presetName),
+          advancedOptions: normalizedAdvancedOptions(activeGroup),
+          ffmpegPath: ffmpegPath || null,
+        },
+      })
+      setPreviewState({ key, loading: false, error: null, result })
+    } catch (error) {
+      setPreviewState({ key, loading: false, error: String(error), result: null })
     }
   }
 
@@ -887,8 +1042,19 @@ function App() {
     )
   }
 
-  function applyEncodingPreset(preset: EncodingPreset) {
-    applyEncodingPresetToBatch(preset, true)
+  async function applyEncodingPreset(preset: EncodingPreset) {
+    try {
+      const updated = await invoke<ConversionJob[]>('apply_encoding_recipe_to_queued', { preset })
+      setJobs(updated)
+      setIsPresetsOpen(false)
+      setLastError(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  function canApplyEncodingPreset(preset: EncodingPreset) {
+    return jobs.some((job) => job.category === preset.category && job.status === 'queued')
   }
 
   function applyEncodingPresetToBatch(preset: EncodingPreset, closePresets: boolean) {
@@ -919,21 +1085,33 @@ function App() {
     setLastError(null)
   }
 
-  async function saveActiveGroupAsPreset() {
+  function openNewRecipeModal() {
     if (!activeGroup) {
-      setLastError('Add files before saving a preset.')
+      setLastError('Add files before saving a recipe.')
       return
     }
-    const name = customPresetName.trim()
+    setNewRecipeDraft({
+      name: '',
+      description: `Custom ${categoryLabel(activeGroup.category).toLowerCase()} recipe.`,
+    })
+    setLastError(null)
+  }
+
+  async function saveActiveGroupAsPreset() {
+    if (!activeGroup || !newRecipeDraft) {
+      setLastError('Add files before saving a recipe.')
+      return
+    }
+    const name = newRecipeDraft.name.trim()
     if (!name) {
-      setLastError('Enter a preset name first.')
+      setLastError('Enter a recipe name first.')
       return
     }
 
     const preset: EncodingPreset = {
       id: `custom_${Date.now()}`,
       name,
-      description: `Custom ${categoryLabel(activeGroup.category).toLowerCase()} recipe.`,
+      description: newRecipeDraft.description.trim() || `Custom ${categoryLabel(activeGroup.category).toLowerCase()} recipe.`,
       category: activeGroup.category,
       platform: 'Custom',
       targetFormat: activeGroup.targetFormat,
@@ -949,7 +1127,7 @@ function App() {
     try {
       const updated = await invoke<EncodingPreset[]>('save_custom_encoding_preset', { preset })
       setEncodingPresets(updated)
-      setCustomPresetName('')
+      setNewRecipeDraft(null)
       setLastError(null)
     } catch (error) {
       setLastError(String(error))
@@ -960,6 +1138,21 @@ function App() {
     try {
       const updated = await invoke<EncodingPreset[]>('delete_custom_encoding_preset', { id })
       setEncodingPresets(updated)
+      setLastError(null)
+    } catch (error) {
+      setLastError(String(error))
+    }
+  }
+
+  async function exportCustomRecipe(preset: EncodingPreset) {
+    const selected = await save({
+      defaultPath: `${safeFileStem(preset.name)}.json`,
+      filters: [{ name: 'SHIFTR recipes', extensions: ['json'] }],
+    })
+    if (!selected) return
+
+    try {
+      await invoke('export_custom_encoding_preset', { id: preset.id, path: selected })
       setLastError(null)
     } catch (error) {
       setLastError(String(error))
@@ -993,14 +1186,9 @@ function App() {
           </button>
         </div>
 
-        <div className="search-box">
-          <Search size={18} />
-          <input placeholder="Search files or presets..." aria-label="Search files or presets" />
-        </div>
-
         <div className="nav-actions">
-          <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(true)} title="Encoding presets">
-            <SlidersHorizontal size={22} />
+          <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(true)} title="Recipe library">
+            <BookOpenCheck size={22} />
           </button>
           <button className="nav-icon" type="button" onClick={() => setIsSettingsOpen(true)} title="Settings">
             <Settings2 size={22} />
@@ -1216,8 +1404,8 @@ function App() {
               <div style={{ width: `${Math.round(summary.average * 100)}%` }} />
             </div>
             <div className="queue-eta">
-              <span>Estimated time</span>
-              <strong>{summary.queueEta != null ? formatProcessingTime(summary.queueEta) : 'Estimating...'}</strong>
+              <span>{jobs.length ? 'Estimated time' : 'Queue status'}</span>
+              <strong>{jobs.length ? (summary.queueEta != null ? formatProcessingTime(summary.queueEta) : 'Estimating...') : 'No jobs queued'}</strong>
             </div>
             <dl>
               <div><dt>Running</dt><dd>{summary.running}</dd></div>
@@ -1264,6 +1452,7 @@ function App() {
             </div>
 
             <div className="modal-body">
+              <div className="modal-main">
               <section className="modal-section">
                 <h3><SlidersHorizontal size={16} /> {categoryLabel(activeGroup.category)} conversion</h3>
                 {userLevel === 'aware' ? (
@@ -1282,12 +1471,40 @@ function App() {
                     <p className="preset-description">
                       {activeRecipe(activeGroup, encodingPresets)?.description ?? 'Choose a recipe and SHIFTR will handle format, codec, quality, and size settings.'}
                     </p>
+                    <CompatibilityProfileCard profile={groupCompatibilityProfile(activeGroup, encodingPresets, formats.presets)} />
+                    {previewEnabled && (activeGroup.category === 'video' || activeGroup.category === 'audio') && (
+                      <PreviewInline
+                        category={activeGroup.category}
+                        onPreview={renderPreview}
+                        state={visiblePreviewState}
+                      />
+                    )}
                     <button className="secondary-wide" type="button" onClick={() => setIsPresetsOpen(true)}>
                       Browse all recipes
                     </button>
                   </div>
                 ) : (
                   <>
+                    <label>
+                      Encoding recipe
+                      <div className="recipe-picker">
+                        <CustomSelect
+                          value={activeGroup.encodingPresetId ?? 'manual'}
+                          options={recipeSelectOptions(encodingPresets, activeGroup.category)}
+                          onChange={(value) => {
+                            if (value === 'manual') {
+                              updateActiveGroup({ encodingPresetId: null, presetOverride: null })
+                              return
+                            }
+                            const recipe = encodingPresets.find((preset) => preset.id === value)
+                            if (recipe) applyEncodingPresetToBatch(recipe, false)
+                          }}
+                        />
+                        <button className="secondary-compact" type="button" onClick={openNewRecipeModal}>
+                          New recipe
+                        </button>
+                      </div>
+                    </label>
                     <label>
                       Target Format
                       <CustomSelect
@@ -1302,7 +1519,7 @@ function App() {
                       />
                     </label>
                     <label>
-                      Preset
+                      Quality mode
                       <CustomSelect
                         value={activeGroup.presetName}
                         options={presetSelectOptions(activeGroup, formats)}
@@ -1310,6 +1527,14 @@ function App() {
                       />
                     </label>
                     <p className="preset-description">{activeGroup.presetOverride?.description ?? presetByName(activeGroup.presetName).description}</p>
+                    <CompatibilityProfileCard profile={groupCompatibilityProfile(activeGroup, encodingPresets, formats.presets)} />
+                    {previewEnabled && (activeGroup.category === 'video' || activeGroup.category === 'audio') && (
+                      <PreviewInline
+                        category={activeGroup.category}
+                        onPreview={renderPreview}
+                        state={visiblePreviewState}
+                      />
+                    )}
                     <div className="advanced-disclosure">
                       <button
                         className="advanced-toggle"
@@ -1341,9 +1566,10 @@ function App() {
                             Video codec
                             <CustomSelect
                               value={allowedCodecId(ensureAdvancedOptions(activeGroup).videoCodec, allowedVideoCodecs(activeGroup.targetFormat, capabilities)) ?? ''}
-                              options={allowedVideoCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
+                              options={codecSelectOptions(allowedVideoCodecs(activeGroup.targetFormat, capabilities), activeGroup.targetFormat, 'video')}
                               onChange={(value) => updateAdvancedOptions({ videoCodec: value })}
                             />
+                            <span className="field-hint">{videoCodecHint(activeGroup.targetFormat, capabilities)}</span>
                           </label>
                           <label>
                             Video quality
@@ -1377,7 +1603,7 @@ function App() {
                             Audio codec
                             <CustomSelect
                               value={allowedCodecId(ensureAdvancedOptions(activeGroup).audioCodec, allowedAudioCodecs(activeGroup.targetFormat, capabilities)) ?? ''}
-                              options={allowedAudioCodecs(activeGroup.targetFormat, capabilities).map((codec) => ({ value: codec.id, label: codecLabel(codec) }))}
+                              options={codecSelectOptions(allowedAudioCodecs(activeGroup.targetFormat, capabilities), activeGroup.targetFormat, 'audio')}
                               onChange={(value) => updateAdvancedOptions({ audioCodec: value })}
                             />
                           </label>
@@ -1449,16 +1675,30 @@ function App() {
                   </>
                 )}
               </section>
+              </div>
 
-              <section className="modal-section">
-                <h3><HardDrive size={16} /> Output location</h3>
-                <div className="output-card">
-                  <div>{batchOutputDir || 'Same as source file'}</div>
-                  <button type="button" onClick={chooseBatchOutputDir}>
-                    <FolderOpen size={17} /> Browse...
-                  </button>
-                </div>
-              </section>
+              <aside className="modal-side">
+                <section className="modal-section">
+                  <h3><HardDrive size={16} /> Output location</h3>
+                  <div className="output-card">
+                    <div>{batchOutputDir || 'Same as source file'}</div>
+                    <button type="button" onClick={chooseBatchOutputDir}>
+                      <FolderOpen size={17} /> Browse...
+                    </button>
+                  </div>
+                </section>
+
+                <section className="modal-section">
+                  <h3><HardDrive size={16} /> Estimated size</h3>
+                  <SizeEstimatePanel
+                    group={activeGroup}
+                    estimate={visibleOutputSizeEstimate}
+                    preview={visiblePreviewState.result}
+                    validation={sizeTargetValidation}
+                  />
+                </section>
+
+              </aside>
             </div>
 
             <footer className="modal-footer">
@@ -1556,10 +1796,10 @@ function App() {
           <section className="settings-modal presets-modal" role="dialog" aria-modal="true" aria-labelledby="presets-title">
             <header className="modal-head">
               <div>
-                <p>Presets</p>
+                <p>Recipes</p>
                 <h2 id="presets-title">Encoding recipes</h2>
               </div>
-              <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(false)} title="Close presets">
+              <button className="nav-icon" type="button" onClick={() => setIsPresetsOpen(false)} title="Close recipes">
                 <X size={20} />
               </button>
             </header>
@@ -1567,20 +1807,21 @@ function App() {
             <div className="settings-body presets-body">
               {activeGroup && (
                 <section className="modal-section">
-                  <h3><Check size={16} /> Save current setup</h3>
-                  <div className="path-picker">
-                    <input
-                      value={customPresetName}
-                      onChange={(event) => setCustomPresetName(event.target.value)}
-                      placeholder={`${categoryLabel(activeGroup.category)} preset name`}
-                    />
-                    <button type="button" onClick={saveActiveGroupAsPreset}>Save</button>
-                  </div>
+                  <h3><Check size={16} /> Save current recipe</h3>
+                  <button className="secondary-wide" type="button" onClick={openNewRecipeModal}>New recipe</button>
+                  <p className="preset-description">Stores the active batch tab as a custom encoding recipe.</p>
+                </section>
+              )}
+
+              {!activeGroup && (
+                <section className="modal-section">
+                  <h3><Check size={16} /> Custom recipes</h3>
+                  <p className="preset-description">Add files and configure a batch first, then save that setup as a reusable custom recipe.</p>
                 </section>
               )}
 
               <section className="modal-section">
-                <h3><SlidersHorizontal size={16} /> Built-in and custom presets</h3>
+                <h3><SlidersHorizontal size={16} /> Built-in and custom recipes</h3>
                 <div className="preset-grid">
                   {encodingPresets.filter((preset) => isMediaCategory(preset.category)).map((preset) => (
                     <article className="preset-card" key={preset.id}>
@@ -1594,25 +1835,100 @@ function App() {
                         <span>{preset.builtIn ? 'Built-in' : 'Custom'}</span>
                       </div>
                       <div className="preset-actions">
-                        <button type="button" className="secondary-wide" onClick={() => applyEncodingPreset(preset)}>
-                          Apply
+                        <button
+                          type="button"
+                          className="secondary-wide"
+                          disabled={!canApplyEncodingPreset(preset)}
+                          onClick={() => applyEncodingPreset(preset)}
+                          title={canApplyEncodingPreset(preset) ? 'Apply to queued jobs of this type' : `Add queued ${categoryLabel(preset.category as MediaCategory).toLowerCase()} jobs to use this recipe`}
+                        >
+                          {canApplyEncodingPreset(preset) ? 'Use recipe' : 'No queued jobs'}
                         </button>
                         {!preset.builtIn && (
-                          <button type="button" className="icon-button danger" onClick={() => deleteEncodingPreset(preset.id)} title="Delete preset">
-                            <X size={17} />
-                          </button>
+                          <>
+                            <button type="button" className="icon-button" onClick={() => exportCustomRecipe(preset)} title="Export recipe">
+                              <Download size={17} />
+                            </button>
+                            <button type="button" className="icon-button danger" onClick={() => deleteEncodingPreset(preset.id)} title="Delete recipe">
+                              <X size={17} />
+                            </button>
+                          </>
                         )}
                       </div>
                     </article>
                   ))}
                 </div>
               </section>
+
+              <section
+                className={recipeImportActive ? 'recipe-import-zone active' : 'recipe-import-zone'}
+                onDragOver={(event) => event.preventDefault()}
+                onDrop={(event) => {
+                  event.preventDefault()
+                  const paths = Array.from(event.dataTransfer.files)
+                    .map((file) => (file as File & { path?: string }).path)
+                    .filter((path): path is string => Boolean(path))
+                  void importRecipeFiles(paths)
+                }}
+              >
+                <strong>Drop recipe JSON here</strong>
+                <span>Imported recipes are appended to your custom recipe library.</span>
+              </section>
             </div>
 
             <footer className="modal-footer">
-              <span className="settings-note">Presets apply to the matching batch tab.</span>
+              <span className="settings-note">Recipes update queued jobs of the matching type only.</span>
               <button type="button" className="start-processing" onClick={() => setIsPresetsOpen(false)}>
                 Done
+              </button>
+            </footer>
+          </section>
+        </div>
+      )}
+
+      {newRecipeDraft && activeGroup && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="settings-modal recipe-modal" role="dialog" aria-modal="true" aria-labelledby="new-recipe-title">
+            <header className="modal-head">
+              <div>
+                <p>New recipe</p>
+                <h2 id="new-recipe-title">Save current setup</h2>
+              </div>
+              <button className="nav-icon" type="button" onClick={() => setNewRecipeDraft(null)} title="Close recipe dialog">
+                <X size={20} />
+              </button>
+            </header>
+
+            <div className="settings-body">
+              <section className="modal-section">
+                <h3><Check size={16} /> Current setup</h3>
+                <p className="preset-description">
+                  SHIFTR will save the current {categoryLabel(activeGroup.category).toLowerCase()} format, quality mode, codec choices, advanced options, and size target as a reusable encoding recipe.
+                </p>
+                <label>
+                  Recipe name
+                  <input
+                    autoFocus
+                    value={newRecipeDraft.name}
+                    onChange={(event) => setNewRecipeDraft((current) => current ? { ...current, name: event.target.value } : current)}
+                    placeholder={`${categoryLabel(activeGroup.category)} recipe`}
+                  />
+                </label>
+                <label>
+                  Description
+                  <textarea
+                    value={newRecipeDraft.description}
+                    onChange={(event) => setNewRecipeDraft((current) => current ? { ...current, description: event.target.value } : current)}
+                    placeholder="What is this recipe good for?"
+                  />
+                </label>
+              </section>
+            </div>
+
+            <footer className="modal-footer">
+              <button type="button" className="secondary-wide" onClick={() => setNewRecipeDraft(null)}>Cancel</button>
+              <button type="button" className="start-processing" onClick={saveActiveGroupAsPreset}>
+                Save recipe
               </button>
             </footer>
           </section>
@@ -1683,6 +1999,7 @@ function App() {
                 <div className="capability-summary">
                   <span>{capabilities.ffmpegAvailable ? 'FFmpeg detected' : 'Using fallback matrix'}</span>
                   <span>{capabilities.hardwareAccels.length ? capabilities.hardwareAccels.join(', ') : 'No hardware acceleration detected'}</span>
+                  <span>{capabilities.hardwareDevices.length ? `GPU: ${capabilities.hardwareDevices.join(', ')}` : 'GPU not identified'}</span>
                 </div>
                 <label>
                   FFmpeg Path
@@ -1729,6 +2046,19 @@ function App() {
                   </button>
                 )}
               </section>
+
+              <section className="modal-section">
+                <h3><Play size={16} /> Preview</h3>
+                <label className="toggle-row">
+                  <span>Enable manual preview rendering</span>
+                  <input
+                    checked={previewEnabled}
+                    onChange={(event) => setPreviewEnabled(event.target.checked)}
+                    type="checkbox"
+                  />
+                </label>
+                <p className="preset-description">When enabled, batch setup shows a manual Preview button for video and audio files.</p>
+              </section>
             </div>
 
             <footer className="modal-footer">
@@ -1750,6 +2080,18 @@ function fileName(path: string) {
 
 function extension(path: string) {
   return path.split('.').pop()?.toLowerCase() ?? ''
+}
+
+function safeFileStem(value: string) {
+  return value
+    .trim()
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 || '<>:"/\\|?*'.includes(char) ? '-' : char))
+    .join('')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    || 'shiftr-recipe'
 }
 
 function isImagePath(path: string, formats: SupportedFormats) {
@@ -1791,6 +2133,10 @@ function storedUserLevel(): UserLevel | null {
   return value === 'aware' || value === 'capable' || value === 'fluent' ? value : null
 }
 
+function storedPreviewEnabled() {
+  return localStorage.getItem(previewEnabledStorageKey) !== 'false'
+}
+
 function userLevelTitle(level: UserLevel) {
   if (level === 'aware') return 'Aware'
   if (level === 'fluent') return 'Fluent'
@@ -1798,19 +2144,19 @@ function userLevelTitle(level: UserLevel) {
 }
 
 function userLevelEyebrow(level: UserLevel) {
-  if (level === 'aware') return 'Preset guided'
+  if (level === 'aware') return 'Recipe guided'
   if (level === 'fluent') return 'Full control'
   return 'Hands-on'
 }
 
 function userLevelDescription(level: UserLevel) {
   if (level === 'aware') {
-    return 'Use ready-made recipes, import shared presets, and let SHIFTR choose the technical settings.'
+    return 'Use ready-made recipes, import shared recipes, and let SHIFTR choose the technical settings.'
   }
   if (level === 'fluent') {
     return 'Open advanced controls by default and tune codecs, bitrate, frame rate, size targets, and more.'
   }
-  return 'Choose formats and quality presets yourself, with advanced controls available when you need them.'
+  return 'Choose formats and quality modes yourself, with advanced controls available when you need them.'
 }
 
 function compatibleEncodingPresets(presets: EncodingPreset[], category: MediaCategory) {
@@ -1821,34 +2167,59 @@ function activeRecipe(group: BatchGroup, presets: EncodingPreset[]) {
   return presets.find((preset) => preset.id === group.encodingPresetId)
 }
 
+function recipeSelectOptions(presets: EncodingPreset[], category: MediaCategory) {
+  return [
+    { value: 'manual', label: 'Manual setup' },
+    ...compatibleEncodingPresets(presets, category).map((preset) => ({
+      value: preset.id,
+      label: `${preset.name} · .${preset.targetFormat}`,
+    })),
+  ]
+}
+
+function batchPreviewKey(group: BatchGroup) {
+  return JSON.stringify({
+    category: group.category,
+    firstPath: group.paths[0] ?? '',
+    targetFormat: group.targetFormat,
+    presetName: group.presetName,
+    presetOverride: group.presetOverride,
+    encodingPresetId: group.encodingPresetId,
+    advancedOptions: group.advancedOptions,
+  })
+}
+
 function jobTitle(job: ConversionJob) {
   return fileName(job.outputPath)
 }
 
 function jobSettingsRows(job: ConversionJob) {
   const options = job.advancedOptions
+  const compatibility = compatibilityProfile(job.category, job.targetFormat, options, job.preset.qualityMode)
   const rows = [
     { label: 'Format', value: `.${job.sourceFormat || 'unknown'} -> .${job.targetFormat}` },
-    { label: 'Preset', value: `${job.preset.name} · ${qualityModeLabel(job.preset.qualityMode)}` },
+    { label: 'Quality', value: `${job.preset.name} · ${qualityModeLabel(job.preset.qualityMode)}` },
+    { label: 'Playback', value: `Web ${compatibility.web} · Apple ${compatibility.apple} · Win ${compatibility.windows}` },
+    { label: 'Efficiency', value: `Size ${compatibility.size} · Quality ${compatibility.quality}` },
   ]
 
   if (job.category === 'video') {
     rows.push(
       { label: 'Video', value: compactCodecValue(options?.copyStreams, options?.videoCodec) },
       { label: 'Audio', value: compactCodecValue(options?.copyStreams, options?.audioCodec) },
-      { label: 'Quality', value: options?.videoQuality ? qualityLabel(options.videoQuality) : 'Preset decides' },
+      { label: 'Quality', value: options?.videoQuality ? qualityLabel(options.videoQuality) : 'Auto' },
       { label: 'Limits', value: compactVideoLimits(options) },
       { label: 'Size', value: options?.targetSizeMb ? formatTargetSize(options.targetSizeMb) : 'Keep auto' },
     )
   } else if (job.category === 'audio') {
     rows.push(
       { label: 'Audio', value: compactCodecValue(options?.copyStreams, options?.audioCodec) },
-      { label: 'Bitrate', value: options?.targetSizeMb ? 'From size target' : options?.audioBitrate ?? 'Preset decides' },
+      { label: 'Bitrate', value: options?.targetSizeMb ? 'From size target' : options?.audioBitrate ?? 'Auto' },
       { label: 'Size', value: options?.targetSizeMb ? formatTargetSize(options.targetSizeMb) : 'Keep auto' },
     )
   } else if (job.category === 'image') {
     rows.push(
-      { label: 'Quality', value: options?.imageQuality ? qualityLabel(options.imageQuality) : 'Preset decides' },
+      { label: 'Quality', value: options?.imageQuality ? qualityLabel(options.imageQuality) : 'Auto' },
     )
   } else if (job.category === 'document') {
     rows.push(
@@ -1864,7 +2235,7 @@ function jobSettingsRows(job: ConversionJob) {
 
 function compactCodecValue(copyStreams?: boolean | null, codec?: string | null) {
   if (copyStreams) return 'Copy source'
-  return codec || 'Preset decides'
+  return codec || 'Auto'
 }
 
 function compactVideoLimits(options?: AdvancedOptions | null) {
@@ -1925,6 +2296,37 @@ function formatProcessingTime(seconds: number) {
   return `${secs} sec`
 }
 
+function formatBytes(value?: number | null) {
+  if (value == null) return 'Unknown'
+  const abs = Math.abs(value)
+  if (abs >= 1024 ** 3) return `${(value / 1024 ** 3).toFixed(2)} GB`
+  if (abs >= 1024 ** 2) return `${(value / 1024 ** 2).toFixed(1)} MB`
+  if (abs >= 1024) return `${Math.round(value / 1024)} KB`
+  return `${value} B`
+}
+
+function formatByteRange(min?: number | null, max?: number | null) {
+  if (min == null || max == null) return 'Unknown'
+  if (Math.abs(max - min) < 1024) return `~${formatBytes((min + max) / 2)}`
+  return `~${formatBytes(min)} - ${formatBytes(max)}`
+}
+
+function sumOptional(values: Array<number | null | undefined>) {
+  const known = values.filter((value): value is number => value != null)
+  return known.length ? known.reduce((sum, value) => sum + value, 0) : null
+}
+
+function formatDeltaBytes(value?: number | null) {
+  if (value == null) return 'Unknown'
+  if (value === 0) return 'No change'
+  return `${value > 0 ? '+' : '-'}${formatBytes(Math.abs(value))}`
+}
+
+function deltaClass(value?: number | null) {
+  if (value == null || value === 0) return ''
+  return value < 0 ? 'delta-good' : 'delta-warn'
+}
+
 function normalizeVersion(value: string) {
   return value.trim().replace(/^v/i, '')
 }
@@ -1941,13 +2343,198 @@ function compareVersions(left: string, right: string) {
   return 0
 }
 
+function CompatibilityProfileCard({ profile }: { profile: CompatibilityProfile }) {
+  const rows = [
+    { label: 'Web compatibility', value: profile.web },
+    { label: 'Apple devices', value: profile.apple },
+    { label: 'Windows default player', value: profile.windows },
+    { label: 'File size efficiency', value: profile.size },
+    { label: 'Quality retention', value: profile.quality },
+  ]
+
+  return (
+    <div className="compatibility-card">
+      <div className="compatibility-title">Compatibility profile</div>
+      <div className="compatibility-grid">
+        {rows.map((row) => (
+          <div key={row.label}>
+            <span>{row.label}</span>
+            <strong className={`score-${row.value.toLowerCase()}`}>{row.value}</strong>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function PreviewInline({
+  category,
+  onPreview,
+  state,
+}: {
+  category: MediaCategory
+  onPreview: () => void
+  state: PreviewState
+}) {
+  return (
+    <div className="preview-inline">
+      <button
+        className="preview-button"
+        disabled={state.loading}
+        onClick={onPreview}
+        type="button"
+      >
+        <Play size={17} />
+        {state.loading ? 'Rendering preview...' : 'Preview'}
+      </button>
+      <PreviewPlayer category={category} state={state} />
+    </div>
+  )
+}
+
+function PreviewPlayer({ category, state }: { category: MediaCategory; state: PreviewState }) {
+  if (state.error) {
+    return <div className="preview-error">{state.error}</div>
+  }
+
+  if (!state.result) {
+    return null
+  }
+
+  const result = state.result
+  const previewSrc = convertFileSrc(result.previewPath)
+
+  return (
+    <div className="preview-card">
+      <div className="preview-media-wrap">
+        {category === 'video' ? (
+          <video controls src={previewSrc} />
+        ) : (
+          <audio controls src={previewSrc} />
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SizeEstimatePanel({
+  group,
+  estimate,
+  preview,
+  validation,
+}: {
+  group: BatchGroup
+  estimate: OutputSizeEstimateState
+  preview: PreviewResult | null
+  validation: { key: string; value: SizeTargetValidation } | null
+}) {
+  if (group.category !== 'video' && group.category !== 'audio') {
+    return <p className="size-estimate-empty">Size estimate is available for video and audio conversions.</p>
+  }
+
+  const targetSizeMb = group.advancedOptions?.targetSizeMb
+  if (targetSizeMb) {
+    if (!validation || validation.key !== sizeTargetValidationKey(group)) {
+      return <p className="size-estimate-empty">Estimating selected size target...</p>
+    }
+
+    const estimates = validation.value.estimates
+    const sourceBytes = sumOptional(estimates.map((estimate) => estimate.sourceSizeBytes))
+    const outputBytes = sumOptional(estimates.map((estimate) => estimate.estimatedOutputSizeBytes))
+    const deltaBytes = sourceBytes != null && outputBytes != null ? outputBytes - sourceBytes : null
+
+    return (
+      <div className="size-estimate-card">
+        <div>
+          <span>Source total</span>
+          <strong>{formatBytes(sourceBytes)}</strong>
+        </div>
+        <div>
+          <span>Estimated output</span>
+          <strong>{formatBytes(outputBytes)}</strong>
+        </div>
+        <div>
+          <span>Size delta</span>
+          <strong className={deltaClass(deltaBytes)}>{formatDeltaBytes(deltaBytes)}</strong>
+        </div>
+        <div>
+          <span>Basis</span>
+          <strong>Size target</strong>
+        </div>
+        {validation.value.warnings.length > 0 && (
+          <p>{validation.value.warnings[0]}</p>
+        )}
+      </div>
+    )
+  }
+
+  if (preview?.estimatedOutputSizeBytes != null) {
+    const deltaBytes = preview.estimatedDeltaBytes ?? (
+      preview.sourceSizeBytes != null ? preview.estimatedOutputSizeBytes - preview.sourceSizeBytes : null
+    )
+
+    return (
+      <div className="size-estimate-card">
+        <div>
+          <span>Source total</span>
+          <strong>{formatBytes(preview.sourceSizeBytes)}</strong>
+        </div>
+        <div>
+          <span>Estimated output</span>
+          <strong>~{formatBytes(preview.estimatedOutputSizeBytes)}</strong>
+        </div>
+        <div>
+          <span>Size delta</span>
+          <strong className={deltaClass(deltaBytes)}>{formatDeltaBytes(deltaBytes)}</strong>
+        </div>
+        <div>
+          <span>Basis</span>
+          <strong>{formatProcessingTime(preview.previewSeconds)} sample</strong>
+        </div>
+        <p>Refined with the rendered preview sample.</p>
+      </div>
+    )
+  }
+
+  if (estimate.error) {
+    return <p className="size-estimate-empty">{estimate.error}</p>
+  }
+  if (!estimate.result) {
+    return <p className="size-estimate-empty">Estimating output size...</p>
+  }
+
+  return (
+    <div className="size-estimate-card">
+      <div>
+        <span>Source total</span>
+        <strong>{formatBytes(estimate.result.sourceSizeBytes)}</strong>
+      </div>
+      <div>
+        <span>Estimated output</span>
+        <strong>{formatByteRange(estimate.result.estimatedMinBytes, estimate.result.estimatedMaxBytes)}</strong>
+      </div>
+      <div>
+        <span>Size delta</span>
+        <strong className={deltaClass(estimate.result.estimatedDeltaBytes)}>
+          {formatDeltaBytes(estimate.result.estimatedDeltaBytes)}
+        </strong>
+      </div>
+      <div>
+        <span>Confidence</span>
+        <strong>{estimate.result.confidence}</strong>
+      </div>
+      <p>{estimate.result.basis}</p>
+    </div>
+  )
+}
+
 function CustomSelect({
   value,
   options,
   onChange,
 }: {
   value: string
-  options: Array<{ value: string; label: string }>
+  options: Array<{ value: string; label: string; recommended?: boolean }>
   onChange: (value: string) => void
 }) {
   const [open, setOpen] = useState(false)
@@ -1964,6 +2551,7 @@ function CustomSelect({
     >
       <button type="button" onClick={() => setOpen((current) => !current)}>
         <span>{selected?.label ?? value}</span>
+        {selected?.recommended && <em className="select-badge">Recommended</em>}
         <ChevronDown size={18} />
       </button>
       {open && (
@@ -1979,7 +2567,10 @@ function CustomSelect({
               type="button"
             >
               <span>{option.label}</span>
-              {option.value === value && <Check size={14} />}
+              <span className="custom-select-meta">
+                {option.recommended && <em className="select-badge">Recommended</em>}
+                {option.value === value && <Check size={14} />}
+              </span>
             </button>
           ))}
         </div>
@@ -2048,8 +2639,198 @@ function losslessAudioOnly(targetFormat: string, capabilities: ConversionCapabil
   return codecs.length > 0 && codecs.every((codec) => codec.id === 'flac' || codec.id === 'pcm_s16le')
 }
 
+function videoCodecHint(targetFormat: string, capabilities: ConversionCapabilities) {
+  if (targetFormat === 'webm') {
+    return 'WebM supports VP8, VP9, and AV1. Use MP4, MKV, or MOV for H.264 / NVIDIA NVENC.'
+  }
+
+  const codecs = allowedVideoCodecs(targetFormat, capabilities)
+  const hasHardwareCodec = codecs.some((codec) => codec.hardware)
+  if (!hasHardwareCodec && ['mp4', 'mkv', 'mov'].includes(targetFormat)) {
+    return 'GPU codecs appear only when FFmpeg supports them and matching hardware is detected.'
+  }
+
+  return 'This list is filtered by the selected output container and detected encoders.'
+}
+
 function codecLabel(codec: CodecOption) {
   return `${codec.label}${codec.hardware ? ' · GPU' : ''}`
+}
+
+function codecSelectOptions(codecs: CodecOption[], targetFormat: string, kind: 'video' | 'audio') {
+  const recommended = kind === 'video'
+    ? recommendedVideoCodecIds(targetFormat)
+    : recommendedAudioCodecIds(targetFormat)
+  return codecs.map((codec) => ({
+    value: codec.id,
+    label: codecLabel(codec),
+    recommended: recommended.includes(codec.id),
+  }))
+}
+
+function groupCompatibilityProfile(group: BatchGroup, presets: EncodingPreset[], conversionPresets: ConversionPreset[]) {
+  const recipe = activeRecipe(group, presets)
+  const options = group.advancedOptions ?? recipe?.advancedOptions ?? null
+  const fallback = conversionPresets.find((preset) => preset.name === group.presetName) ?? fallbackPreset
+  const qualityMode = group.presetOverride?.qualityMode ?? recipe?.preset.qualityMode ?? fallback.qualityMode
+  const targetFormat = recipe?.targetFormat ?? group.targetFormat
+  return compatibilityProfile(group.category, targetFormat, options, qualityMode)
+}
+
+function compatibilityProfile(
+  category: FileCategory,
+  targetFormat: string,
+  options?: AdvancedOptions | null,
+  qualityMode: QualityMode = 'balanced',
+): CompatibilityProfile {
+  if (category === 'image') {
+    return imageCompatibilityProfile(targetFormat, options)
+  }
+  if (category === 'audio') {
+    return audioCompatibilityProfile(targetFormat, options, qualityMode)
+  }
+  if (category !== 'video') {
+    return { web: 'Medium', apple: 'Medium', windows: 'Medium', size: 'Medium', quality: 'Medium' }
+  }
+
+  const videoCodec = options?.copyStreams ? 'copy' : options?.videoCodec ?? recommendedVideoCodecIds(targetFormat)[0] ?? ''
+  const audioCodec = options?.copyStreams ? 'copy' : options?.audioCodec ?? recommendedAudioCodecIds(targetFormat)[0] ?? ''
+
+  const web = targetFormat === 'mp4' && isH264(videoCodec) && isAac(audioCodec)
+    ? 'Excellent'
+    : targetFormat === 'webm' && (isVp9(videoCodec) || isAv1(videoCodec)) && isOpus(audioCodec)
+      ? 'Excellent'
+      : targetFormat === 'mov' && isH264(videoCodec) && isAac(audioCodec)
+        ? 'High'
+        : targetFormat === 'mkv'
+          ? 'Medium'
+          : 'Low'
+
+  const apple = (targetFormat === 'mp4' || targetFormat === 'mov') && isH264(videoCodec) && isAac(audioCodec)
+    ? 'Excellent'
+    : (targetFormat === 'mp4' || targetFormat === 'mov') && isH265(videoCodec)
+      ? 'Medium'
+      : targetFormat === 'mkv' || targetFormat === 'webm'
+        ? 'Low'
+        : 'Medium'
+
+  const windows = targetFormat === 'mp4' && isH264(videoCodec) && isAac(audioCodec)
+    ? 'Excellent'
+    : targetFormat === 'avi' && isMpeg4(videoCodec)
+      ? 'Medium'
+      : targetFormat === 'mkv' && isH264(videoCodec)
+        ? 'Medium'
+        : targetFormat === 'webm'
+          ? 'Low'
+          : 'Medium'
+
+  return {
+    web,
+    apple,
+    windows,
+    size: sizeEfficiency(videoCodec, audioCodec, options, qualityMode),
+    quality: qualityRetention(audioCodec, options, qualityMode),
+  }
+}
+
+function imageCompatibilityProfile(targetFormat: string, options?: AdvancedOptions | null): CompatibilityProfile {
+  const format = targetFormat.toLowerCase()
+  const lossyQuality = options?.imageQuality ?? 86
+  const web: CompatibilityRating = ['jpg', 'jpeg', 'png', 'webp'].includes(format) ? 'Excellent' : 'Medium'
+  const apple: CompatibilityRating = ['jpg', 'jpeg', 'png'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : 'Medium'
+  const windows: CompatibilityRating = ['jpg', 'jpeg', 'png', 'bmp'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : 'Medium'
+  const size: CompatibilityRating = format === 'webp' ? 'High' : ['jpg', 'jpeg'].includes(format) ? 'Medium' : format === 'png' ? 'Medium' : 'Low'
+  const quality: CompatibilityRating = ['png', 'tiff'].includes(format) ? 'Excellent' : lossyQuality >= 86 ? 'High' : lossyQuality >= 60 ? 'Medium' : 'Low'
+  return { web, apple, windows, size, quality }
+}
+
+function audioCompatibilityProfile(
+  targetFormat: string,
+  options?: AdvancedOptions | null,
+  qualityMode: QualityMode = 'balanced',
+): CompatibilityProfile {
+  const audioCodec = options?.copyStreams ? 'copy' : options?.audioCodec ?? recommendedAudioCodecIds(targetFormat)[0] ?? ''
+  const web: CompatibilityRating = targetFormat === 'mp3' || targetFormat === 'aac' || targetFormat === 'm4a' || isOpus(audioCodec) ? 'High' : 'Medium'
+  const apple: CompatibilityRating = targetFormat === 'aac' || targetFormat === 'm4a' || isAac(audioCodec) ? 'Excellent' : targetFormat === 'mp3' ? 'High' : 'Medium'
+  const windows: CompatibilityRating = targetFormat === 'mp3' || targetFormat === 'wav' || isAac(audioCodec) ? 'Excellent' : targetFormat === 'flac' ? 'High' : 'Medium'
+  return {
+    web,
+    apple,
+    windows,
+    size: sizeEfficiency('', audioCodec, options, qualityMode),
+    quality: qualityRetention(audioCodec, options, qualityMode),
+  }
+}
+
+function recommendedVideoCodecIds(targetFormat: string) {
+  if (targetFormat === 'webm') return ['libvpx-vp9']
+  if (targetFormat === 'avi') return ['mpeg4']
+  if (targetFormat === 'mp4' || targetFormat === 'mkv' || targetFormat === 'mov') {
+    return ['libx264', 'h264_nvenc', 'h264_qsv', 'h264_amf']
+  }
+  return ['mpeg4']
+}
+
+function recommendedAudioCodecIds(targetFormat: string) {
+  if (targetFormat === 'webm' || targetFormat === 'ogg' || targetFormat === 'opus') return ['libopus']
+  if (targetFormat === 'mp3') return ['libmp3lame']
+  if (targetFormat === 'flac') return ['flac']
+  if (targetFormat === 'wav') return ['pcm_s16le']
+  return ['aac']
+}
+
+function sizeEfficiency(
+  videoCodec: string,
+  audioCodec: string,
+  options?: AdvancedOptions | null,
+  qualityMode: QualityMode = 'balanced',
+): CompatibilityRating {
+  if (options?.targetSizeMb) return 'High'
+  if (isAv1(videoCodec)) return 'Excellent'
+  if (isVp9(videoCodec) || isH265(videoCodec) || isOpus(audioCodec)) return 'High'
+  if (qualityMode === 'smallSize') return 'High'
+  if (isMpeg4(videoCodec) || audioCodec === 'pcm_s16le') return 'Low'
+  return 'Medium'
+}
+
+function qualityRetention(
+  audioCodec: string,
+  options?: AdvancedOptions | null,
+  qualityMode: QualityMode = 'balanced',
+): CompatibilityRating {
+  if (options?.copyStreams || audioCodec === 'flac' || audioCodec === 'pcm_s16le') return 'Excellent'
+  if (options?.targetSizeMb) return 'Medium'
+  if (qualityMode === 'highQuality' || qualityMode === 'keepSource') return 'High'
+  if (qualityMode === 'smallSize') return 'Medium'
+  return 'Medium'
+}
+
+function isH264(codec: string) {
+  return codec === 'libx264' || codec.startsWith('h264_')
+}
+
+function isH265(codec: string) {
+  return codec === 'libx265' || codec.startsWith('hevc_')
+}
+
+function isVp9(codec: string) {
+  return codec === 'libvpx-vp9'
+}
+
+function isAv1(codec: string) {
+  return codec === 'libaom-av1'
+}
+
+function isMpeg4(codec: string) {
+  return codec === 'mpeg4'
+}
+
+function isAac(codec: string) {
+  return codec === 'aac'
+}
+
+function isOpus(codec: string) {
+  return codec === 'libopus'
 }
 
 function allowedCodecId(value: string | null | undefined, codecs: CodecOption[]) {

@@ -41,6 +41,44 @@ pub fn delete_custom_preset(app: &AppHandle, id: &str) -> Result<Vec<EncodingPre
     all_presets(app)
 }
 
+pub fn export_custom_preset(app: &AppHandle, id: &str, path: &str) -> Result<()> {
+    let preset = load_custom_presets(app)?
+        .into_iter()
+        .find(|preset| preset.id == id)
+        .context("Custom recipe was not found")?;
+    let store = EncodingPresetStore {
+        schema_version: SCHEMA_VERSION,
+        presets: vec![preset],
+    };
+    let text = serde_json::to_string_pretty(&store).context("Could not serialize custom recipe")?;
+    fs::write(path, text).context("Could not export custom recipe")
+}
+
+pub fn import_custom_presets(app: &AppHandle, path: &str) -> Result<Vec<EncodingPreset>> {
+    let text = fs::read_to_string(path).context("Could not read recipe import file")?;
+    let mut imported = serde_json::from_str::<EncodingPresetStore>(&text)
+        .map(|store| store.presets)
+        .or_else(|_| serde_json::from_str::<Vec<EncodingPreset>>(&text))
+        .context("Could not parse recipe import file")?;
+
+    let mut custom = load_custom_presets(app)?;
+    for mut preset in imported.drain(..) {
+        preset.built_in = false;
+        preset.id = custom_id();
+        if preset.name.trim().is_empty() {
+            preset.name = "Imported recipe".into();
+        }
+        if preset.description.trim().is_empty() {
+            preset.description = "Imported custom encoding recipe.".into();
+        }
+        preset.platform = preset.platform.or_else(|| Some("Imported".into()));
+        custom.push(preset);
+    }
+
+    write_custom_presets(app, custom)?;
+    all_presets(app)
+}
+
 fn custom_id() -> String {
     format!("custom_{}", Uuid::new_v4())
 }

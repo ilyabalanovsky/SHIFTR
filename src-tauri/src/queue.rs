@@ -1,6 +1,6 @@
 use crate::{
     engines::{self, resolve_output_path},
-    models::{ConversionJob, JobStatus, QueueOptions},
+    models::{ConversionJob, EncodingPreset, JobStatus, QueueOptions},
 };
 use anyhow::{Result, anyhow};
 use std::{
@@ -61,6 +61,48 @@ impl QueueState {
                 reserve_output_path(&output_path, &job.input_path, &mut reserved_paths)?;
         }
         Ok(())
+    }
+
+    pub async fn apply_recipe_to_queued(
+        &self,
+        recipe: &EncodingPreset,
+    ) -> Result<Vec<ConversionJob>> {
+        let mut jobs = self.jobs.lock().await;
+        let target_ids = jobs
+            .values()
+            .filter(|job| job.status == JobStatus::Queued && job.category == recipe.category)
+            .map(|job| job.id.clone())
+            .collect::<HashSet<_>>();
+
+        if target_ids.is_empty() {
+            return Err(anyhow!("No queued jobs match this recipe"));
+        }
+
+        let mut reserved_paths = jobs
+            .values()
+            .filter(|job| !target_ids.contains(&job.id))
+            .map(|job| normalized_path_key(&job.output_path))
+            .collect::<HashSet<_>>();
+
+        for job in jobs.values_mut().filter(|job| target_ids.contains(&job.id)) {
+            job.target_format = recipe.target_format.clone();
+            job.preset = recipe.preset.clone();
+            job.advanced_options = recipe.advanced_options.clone();
+
+            let output_dir = Path::new(&job.output_path)
+                .parent()
+                .map(|path| path.to_string_lossy().to_string());
+            let output_path = resolve_output_path(
+                &job.input_path,
+                output_dir.as_deref(),
+                &recipe.target_format,
+                &recipe.preset.overwrite_policy,
+            )?;
+            job.output_path =
+                reserve_output_path(&output_path, &job.input_path, &mut reserved_paths)?;
+        }
+
+        Ok(jobs.values().cloned().collect())
     }
 
     pub async fn rename_output_file(&self, id: &str, output_name: &str) -> Result<ConversionJob> {

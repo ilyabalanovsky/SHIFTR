@@ -141,6 +141,7 @@ pub struct ConversionCapabilities {
     pub ffmpeg_available: bool,
     pub ffmpeg_path: Option<String>,
     pub hardware_accels: Vec<String>,
+    pub hardware_devices: Vec<String>,
     pub video_encoders: Vec<CodecOption>,
     pub audio_encoders: Vec<CodecOption>,
     pub matrix: Vec<FormatCodecMatrix>,
@@ -196,6 +197,9 @@ pub struct SizeTargetValidationRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SizeTargetFileEstimate {
     pub path: String,
+    pub source_size_bytes: Option<u64>,
+    pub estimated_output_size_bytes: Option<u64>,
+    pub estimated_delta_bytes: Option<i64>,
     pub duration_seconds: Option<f64>,
     pub total_kbps: Option<u32>,
     pub video_kbps: Option<u32>,
@@ -210,6 +214,54 @@ pub struct SizeTargetValidation {
     pub applicable: bool,
     pub warnings: Vec<String>,
     pub estimates: Vec<SizeTargetFileEstimate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSizeEstimateRequest {
+    pub paths: Vec<String>,
+    pub category: FileCategory,
+    pub target_format: String,
+    pub preset: ConversionPreset,
+    pub advanced_options: Option<AdvancedOptions>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OutputSizeEstimate {
+    pub source_size_bytes: Option<u64>,
+    pub estimated_min_bytes: Option<u64>,
+    pub estimated_max_bytes: Option<u64>,
+    pub estimated_output_size_bytes: Option<u64>,
+    pub estimated_delta_bytes: Option<i64>,
+    pub confidence: String,
+    pub basis: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewRequest {
+    pub path: String,
+    pub category: FileCategory,
+    pub source_format: String,
+    pub target_format: String,
+    pub preset: ConversionPreset,
+    pub advanced_options: Option<AdvancedOptions>,
+    pub ffmpeg_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewResult {
+    pub input_path: String,
+    pub preview_path: String,
+    pub waveform_path: Option<String>,
+    pub duration_seconds: Option<f64>,
+    pub preview_seconds: f64,
+    pub source_size_bytes: Option<u64>,
+    pub preview_size_bytes: Option<u64>,
+    pub estimated_output_size_bytes: Option<u64>,
+    pub estimated_delta_bytes: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

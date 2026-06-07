@@ -1,9 +1,10 @@
 use crate::{
     capabilities,
-    engines::resolve_output_path,
+    engines::{build_ffmpeg_args, resolve_output_path},
     models::{
         AUDIO_FORMATS, ConversionCapabilities, ConversionJob, CreateJobGroup, DOCUMENT_FORMATS,
-        DocumentJobOptions, EncodingPreset, FileCategory, IMAGE_FORMATS, JobStatus, ProbeResult,
+        DocumentJobOptions, EncodingPreset, FileCategory, IMAGE_FORMATS, JobStatus,
+        OutputSizeEstimate, OutputSizeEstimateRequest, PreviewRequest, PreviewResult, ProbeResult,
         QueueOptions, RenameOutputOptions, SizeTargetFileEstimate, SizeTargetValidation,
         SizeTargetValidationRequest, SupportedFormats, VIDEO_FORMATS, category_for_extension,
         default_presets, extension_for_path,
@@ -57,6 +58,23 @@ pub fn delete_custom_encoding_preset(
 }
 
 #[tauri::command]
+pub fn export_custom_encoding_preset(
+    app: AppHandle,
+    id: String,
+    path: String,
+) -> Result<(), String> {
+    presets::export_custom_preset(&app, &id, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub fn import_custom_encoding_presets(
+    app: AppHandle,
+    path: String,
+) -> Result<Vec<EncodingPreset>, String> {
+    presets::import_custom_presets(&app, &path).map_err(|error| error.to_string())
+}
+
+#[tauri::command]
 pub fn get_conversion_capabilities(ffmpeg_path: Option<String>) -> ConversionCapabilities {
     capabilities::get_capabilities(ffmpeg_path)
 }
@@ -104,6 +122,159 @@ pub fn validate_size_target(
         applicable: estimates.iter().all(|estimate| estimate.applicable),
         warnings,
         estimates,
+    })
+}
+
+#[tauri::command]
+pub fn estimate_output_size(
+    request: OutputSizeEstimateRequest,
+) -> Result<OutputSizeEstimate, String> {
+    if !matches!(request.category, FileCategory::Video | FileCategory::Audio) {
+        return Ok(OutputSizeEstimate {
+            source_size_bytes: None,
+            estimated_min_bytes: None,
+            estimated_max_bytes: None,
+            estimated_output_size_bytes: None,
+            estimated_delta_bytes: None,
+            confidence: "Unavailable".into(),
+            basis: "Size estimates are available for video and audio conversions.".into(),
+        });
+    }
+
+    let source_size = sum_source_sizes(&request.paths);
+    let Some(source_size) = source_size else {
+        return Ok(OutputSizeEstimate {
+            source_size_bytes: None,
+            estimated_min_bytes: None,
+            estimated_max_bytes: None,
+            estimated_output_size_bytes: None,
+            estimated_delta_bytes: None,
+            confidence: "Unavailable".into(),
+            basis: "Could not read source file sizes.".into(),
+        });
+    };
+
+    let factor = rough_size_factor(
+        &request.category,
+        &request.target_format,
+        &request.preset.quality_mode,
+        request.advanced_options.as_ref(),
+    );
+    let estimated = ((source_size as f64) * factor).max(1.0).round() as u64;
+    let spread = rough_size_spread(
+        &request.preset.quality_mode,
+        request.advanced_options.as_ref(),
+    );
+    let min = ((estimated as f64) * (1.0 - spread)).max(1.0).round() as u64;
+    let max = ((estimated as f64) * (1.0 + spread))
+        .max(min as f64)
+        .round() as u64;
+
+    Ok(OutputSizeEstimate {
+        source_size_bytes: Some(source_size),
+        estimated_min_bytes: Some(min),
+        estimated_max_bytes: Some(max),
+        estimated_output_size_bytes: Some(estimated),
+        estimated_delta_bytes: Some(estimated as i64 - source_size as i64),
+        confidence: rough_size_confidence(spread).into(),
+        basis: "Rough estimate based on source size, selected format, codec, and preset.".into(),
+    })
+}
+
+#[tauri::command]
+pub async fn create_conversion_preview(request: PreviewRequest) -> Result<PreviewResult, String> {
+    if !matches!(request.category, FileCategory::Video | FileCategory::Audio) {
+        return Err("Preview is available for video and audio files.".into());
+    }
+
+    let ffmpeg = find_ffmpeg(request.ffmpeg_path.as_deref());
+    let ffprobe = find_ffprobe(request.ffmpeg_path.as_deref());
+    let duration = probe_duration_for_validation(&ffprobe, &request.path);
+    let preview_seconds = preview_duration(duration);
+    let temp_dir = std::env::temp_dir().join("shiftr-previews");
+    std::fs::create_dir_all(&temp_dir).map_err(|error| error.to_string())?;
+    let exact_preview_path = temp_dir.join(format!(
+        "encoded-{}.{}",
+        Uuid::new_v4(),
+        request.target_format
+    ));
+    let playback_path = temp_dir.join(format!(
+        "playback-{}.{}",
+        Uuid::new_v4(),
+        playback_preview_extension(&request.category)
+    ));
+
+    let job = ConversionJob {
+        id: Uuid::new_v4().to_string(),
+        input_path: request.path.clone(),
+        input_paths: vec![request.path.clone()],
+        output_path: exact_preview_path.to_string_lossy().to_string(),
+        source_format: request.source_format.clone(),
+        target_format: request.target_format.clone(),
+        category: request.category.clone(),
+        preset: request.preset,
+        advanced_options: request.advanced_options,
+        document_operation: None,
+        status: JobStatus::Queued,
+        progress: 0.0,
+        speed: None,
+        processing_seconds: None,
+        eta_seconds: None,
+        error: None,
+        error_details: None,
+    };
+
+    let mut args = build_ffmpeg_args(&job);
+    strip_progress_args(&mut args);
+    let output_index = args.len().saturating_sub(1);
+    args.splice(
+        output_index..output_index,
+        ["-t".into(), format!("{preview_seconds:.3}")],
+    );
+
+    let output = Command::new(&ffmpeg)
+        .args(&args)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    render_playback_preview(
+        &ffmpeg,
+        &request.path,
+        &request.category,
+        preview_seconds,
+        &playback_path.to_string_lossy(),
+    )?;
+
+    let source_size = std::fs::metadata(&request.path)
+        .ok()
+        .map(|metadata| metadata.len());
+    let preview_size = std::fs::metadata(&exact_preview_path)
+        .ok()
+        .map(|metadata| metadata.len());
+    let estimated_output_size = match (duration, preview_size) {
+        (Some(duration), Some(size)) if preview_seconds > 0.0 => {
+            Some(((size as f64) * (duration / preview_seconds)).round() as u64)
+        }
+        _ => None,
+    };
+    let estimated_delta = match (estimated_output_size, source_size) {
+        (Some(output), Some(source)) => Some(output as i64 - source as i64),
+        _ => None,
+    };
+
+    Ok(PreviewResult {
+        input_path: request.path,
+        preview_path: playback_path.to_string_lossy().to_string(),
+        waveform_path: None,
+        duration_seconds: duration,
+        preview_seconds,
+        source_size_bytes: source_size,
+        preview_size_bytes: preview_size,
+        estimated_output_size_bytes: estimated_output_size,
+        estimated_delta_bytes: estimated_delta,
     })
 }
 
@@ -405,6 +576,116 @@ fn find_ffprobe(ffmpeg_path: Option<&str>) -> String {
     exe.into()
 }
 
+fn find_ffmpeg(configured: Option<&str>) -> String {
+    if let Some(path) = configured.filter(|path| Path::new(path).exists()) {
+        return path.into();
+    }
+
+    let exe = if cfg!(windows) {
+        "ffmpeg.exe"
+    } else {
+        "ffmpeg"
+    };
+    let bundled = Path::new("resources").join("bin").join(exe);
+    if bundled.exists() {
+        return bundled.to_string_lossy().to_string();
+    }
+
+    exe.into()
+}
+
+fn preview_duration(duration: Option<f64>) -> f64 {
+    match duration {
+        Some(value) if value <= 1.5 => value.max(0.5),
+        Some(value) if value < 5.0 => (value / 2.0).clamp(0.75, value),
+        Some(value) if value < 10.0 => (value / 3.0).clamp(1.0, 5.0),
+        _ => 5.0,
+    }
+}
+
+fn playback_preview_extension(category: &FileCategory) -> &'static str {
+    match category {
+        FileCategory::Video => "webm",
+        FileCategory::Audio => "wav",
+        _ => "mp4",
+    }
+}
+
+fn strip_progress_args(args: &mut Vec<String>) {
+    let mut index = 0;
+    while index < args.len() {
+        if args[index] == "-progress" && index + 1 < args.len() {
+            args.drain(index..=index + 1);
+        } else if args[index] == "-nostats" {
+            args.remove(index);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn render_playback_preview(
+    ffmpeg: &str,
+    input_path: &str,
+    category: &FileCategory,
+    preview_seconds: f64,
+    output_path: &str,
+) -> Result<(), String> {
+    let mut args = vec![
+        "-hide_banner".to_string(),
+        "-y".to_string(),
+        "-t".to_string(),
+        format!("{preview_seconds:.3}"),
+        "-i".to_string(),
+        input_path.to_string(),
+    ];
+
+    match category {
+        FileCategory::Video => args.extend([
+            "-map".into(),
+            "0:v:0?".into(),
+            "-map".into(),
+            "0:a:0?".into(),
+            "-c:v".into(),
+            "libvpx-vp9".into(),
+            "-deadline".into(),
+            "realtime".into(),
+            "-cpu-used".into(),
+            "8".into(),
+            "-b:v".into(),
+            "0".into(),
+            "-crf".into(),
+            "36".into(),
+            "-c:a".into(),
+            "libopus".into(),
+            "-b:a".into(),
+            "96k".into(),
+        ]),
+        FileCategory::Audio => args.extend([
+            "-vn".into(),
+            "-c:a".into(),
+            "pcm_s16le".into(),
+            "-ar".into(),
+            "44100".into(),
+            "-ac".into(),
+            "2".into(),
+        ]),
+        _ => return Err("Playback preview is available for video and audio files.".into()),
+    }
+
+    args.push(output_path.into());
+    let output = Command::new(ffmpeg)
+        .args(&args)
+        .output()
+        .map_err(|error| error.to_string())?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
 fn probe_duration_for_validation(ffprobe: &str, path: &str) -> Option<f64> {
     let output = Command::new(ffprobe)
         .args([
@@ -428,6 +709,134 @@ fn probe_duration_for_validation(ffprobe: &str, path: &str) -> Option<f64> {
         .filter(|duration| *duration > 0.0)
 }
 
+fn sum_source_sizes(paths: &[String]) -> Option<u64> {
+    let mut total = 0_u64;
+    let mut found = false;
+    for path in paths {
+        if let Ok(metadata) = std::fs::metadata(path) {
+            total = total.saturating_add(metadata.len());
+            found = true;
+        }
+    }
+    found.then_some(total)
+}
+
+fn rough_size_factor(
+    category: &FileCategory,
+    target_format: &str,
+    quality_mode: &crate::models::QualityMode,
+    options: Option<&crate::models::AdvancedOptions>,
+) -> f64 {
+    if options.is_some_and(|options| options.copy_streams) {
+        return 1.0;
+    }
+
+    match category {
+        FileCategory::Audio => rough_audio_factor(target_format, quality_mode, options),
+        FileCategory::Video => rough_video_factor(target_format, quality_mode, options),
+        _ => 1.0,
+    }
+}
+
+fn rough_audio_factor(
+    target_format: &str,
+    quality_mode: &crate::models::QualityMode,
+    options: Option<&crate::models::AdvancedOptions>,
+) -> f64 {
+    let codec = options
+        .and_then(|options| options.audio_codec.as_deref())
+        .unwrap_or(match target_format {
+            "flac" => "flac",
+            "wav" => "pcm_s16le",
+            "ogg" | "opus" => "libopus",
+            "mp3" => "libmp3lame",
+            _ => "aac",
+        });
+
+    let codec_factor = match codec {
+        "pcm_s16le" => 1.6,
+        "flac" => 0.9,
+        "libopus" => 0.38,
+        "aac" | "libmp3lame" => 0.52,
+        _ => 0.6,
+    };
+
+    codec_factor * quality_factor(quality_mode)
+}
+
+fn rough_video_factor(
+    target_format: &str,
+    quality_mode: &crate::models::QualityMode,
+    options: Option<&crate::models::AdvancedOptions>,
+) -> f64 {
+    let codec = options
+        .and_then(|options| options.video_codec.as_deref())
+        .unwrap_or(match target_format {
+            "webm" => "libvpx-vp9",
+            "avi" => "mpeg4",
+            _ => "libx264",
+        });
+
+    let codec_factor = match codec {
+        "libaom-av1" => 0.34,
+        "libvpx-vp9" | "libx265" | "hevc_nvenc" | "hevc_qsv" | "hevc_amf" => 0.45,
+        "libx264" | "h264_nvenc" | "h264_qsv" | "h264_amf" => 0.58,
+        "mpeg4" => 0.9,
+        "mjpeg" => 1.25,
+        _ => 0.7,
+    };
+
+    let scale_factor = options
+        .and_then(|options| options.max_width)
+        .map(|width| match width {
+            0..=720 => 0.55,
+            721..=1280 => 0.72,
+            1281..=1920 => 0.9,
+            _ => 1.0,
+        })
+        .unwrap_or(1.0);
+
+    codec_factor * quality_factor(quality_mode) * scale_factor
+}
+
+fn quality_factor(quality_mode: &crate::models::QualityMode) -> f64 {
+    match quality_mode {
+        crate::models::QualityMode::FastRemux => 1.0,
+        crate::models::QualityMode::FastEncode => 0.72,
+        crate::models::QualityMode::SmallSize => 0.5,
+        crate::models::QualityMode::Balanced => 1.0,
+        crate::models::QualityMode::HighQuality => 1.25,
+        crate::models::QualityMode::KeepSource => 1.05,
+    }
+}
+
+fn rough_size_spread(
+    quality_mode: &crate::models::QualityMode,
+    options: Option<&crate::models::AdvancedOptions>,
+) -> f64 {
+    if options.is_some_and(|options| options.copy_streams) {
+        return 0.08;
+    }
+    match quality_mode {
+        crate::models::QualityMode::FastRemux => 0.08,
+        crate::models::QualityMode::SmallSize => 0.45,
+        crate::models::QualityMode::FastEncode => 0.42,
+        crate::models::QualityMode::Balanced => 0.55,
+        crate::models::QualityMode::HighQuality => 0.65,
+        crate::models::QualityMode::KeepSource => 0.7,
+    }
+}
+
+fn rough_size_confidence(spread: f64) -> &'static str {
+    if spread <= 0.12 {
+        "High"
+    } else if spread <= 0.45 {
+        "Medium"
+    } else {
+        "Low"
+    }
+}
+
 fn size_target_estimate(
     path: &str,
     category: FileCategory,
@@ -435,9 +844,19 @@ fn size_target_estimate(
     audio_bitrate: Option<&str>,
     duration: Option<f64>,
 ) -> SizeTargetFileEstimate {
+    let source_size = std::fs::metadata(path).ok().map(|metadata| metadata.len());
+    let estimated_output = Some(u64::from(target_size_mb) * 1024 * 1024);
+    let estimated_delta = match (estimated_output, source_size) {
+        (Some(output), Some(source)) => Some(output as i64 - source as i64),
+        _ => None,
+    };
+
     let Some(duration) = duration else {
         return SizeTargetFileEstimate {
             path: path.into(),
+            source_size_bytes: source_size,
+            estimated_output_size_bytes: estimated_output,
+            estimated_delta_bytes: estimated_delta,
             duration_seconds: None,
             total_kbps: None,
             video_kbps: None,
@@ -468,6 +887,9 @@ fn size_target_estimate(
             };
             SizeTargetFileEstimate {
                 path: path.into(),
+                source_size_bytes: source_size,
+                estimated_output_size_bytes: estimated_output,
+                estimated_delta_bytes: estimated_delta,
                 duration_seconds: Some(duration),
                 total_kbps: Some(total_kbps),
                 video_kbps: None,
@@ -499,6 +921,9 @@ fn size_target_estimate(
             };
             SizeTargetFileEstimate {
                 path: path.into(),
+                source_size_bytes: source_size,
+                estimated_output_size_bytes: estimated_output,
+                estimated_delta_bytes: estimated_delta,
                 duration_seconds: Some(duration),
                 total_kbps: Some(total_kbps),
                 video_kbps: Some(video_kbps),
@@ -509,6 +934,9 @@ fn size_target_estimate(
         }
         _ => SizeTargetFileEstimate {
             path: path.into(),
+            source_size_bytes: source_size,
+            estimated_output_size_bytes: estimated_output,
+            estimated_delta_bytes: estimated_delta,
             duration_seconds: Some(duration),
             total_kbps: Some(total_kbps),
             video_kbps: None,
@@ -546,6 +974,17 @@ pub async fn update_queued_jobs(
         .await
         .map_err(|error| error.to_string())?;
     Ok(state.jobs().await)
+}
+
+#[tauri::command]
+pub async fn apply_encoding_recipe_to_queued(
+    preset: EncodingPreset,
+    state: State<'_, Arc<QueueState>>,
+) -> Result<Vec<ConversionJob>, String> {
+    state
+        .apply_recipe_to_queued(&preset)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]

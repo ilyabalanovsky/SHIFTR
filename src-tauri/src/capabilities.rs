@@ -18,7 +18,15 @@ pub fn get_capabilities(ffmpeg_path: Option<String>) -> ConversionCapabilities {
                 .filter(|output| output.status.success())
                 .map(|output| parse_hwaccels(&String::from_utf8_lossy(&output.stdout)))
                 .unwrap_or_default();
-            capabilities_from_encoders(true, Some(ffmpeg), &encoders, hwaccels, Vec::new())
+            let hardware_devices = detect_hardware_devices();
+            capabilities_from_encoders(
+                true,
+                Some(ffmpeg),
+                &encoders,
+                hwaccels,
+                hardware_devices,
+                Vec::new(),
+            )
         }
         Ok(output) => fallback_capabilities(
             false,
@@ -92,6 +100,7 @@ fn capabilities_from_encoders(
     ffmpeg_path: Option<String>,
     encoders: &HashSet<String>,
     hardware_accels: Vec<String>,
+    hardware_devices: Vec<String>,
     warnings: Vec<String>,
 ) -> ConversionCapabilities {
     let video_ids = [
@@ -125,13 +134,14 @@ fn capabilities_from_encoders(
         ffmpeg_available,
         ffmpeg_path,
         hardware_accels,
+        hardware_devices: hardware_devices.clone(),
         video_encoders: video_ids
             .iter()
-            .map(|id| codec_option(id, encoders))
+            .map(|id| codec_option(id, encoders, &hardware_devices))
             .collect(),
         audio_encoders: audio_ids
             .iter()
-            .map(|id| codec_option(id, encoders))
+            .map(|id| codec_option(id, encoders, &hardware_devices))
             .collect(),
         matrix: target_formats
             .iter()
@@ -139,11 +149,11 @@ fn capabilities_from_encoders(
                 target_format: (*format).into(),
                 video_codecs: video_codec_ids_for_format(format)
                     .iter()
-                    .map(|id| codec_option(id, encoders))
+                    .map(|id| codec_option(id, encoders, &hardware_devices))
                     .collect(),
                 audio_codecs: audio_codec_ids_for_format(format)
                     .iter()
-                    .map(|id| codec_option(id, encoders))
+                    .map(|id| codec_option(id, encoders, &hardware_devices))
                     .collect(),
                 supports_video: matches!(*format, "mp4" | "mkv" | "mov" | "webm" | "avi"),
                 supports_audio: true,
@@ -164,6 +174,7 @@ fn fallback_capabilities(
         ffmpeg_path,
         &fallback_encoder_ids(),
         Vec::new(),
+        Vec::new(),
         warnings,
     )
 }
@@ -175,16 +186,42 @@ fn fallback_encoder_ids() -> HashSet<String> {
         .collect()
 }
 
-fn codec_option(id: &str, encoders: &HashSet<String>) -> CodecOption {
+fn codec_option(id: &str, encoders: &HashSet<String>, hardware_devices: &[String]) -> CodecOption {
+    let hardware = is_hardware_codec(id);
+    let hardware_supported = !hardware || hardware_codec_supported(id, hardware_devices);
     CodecOption {
         id: id.into(),
         label: codec_label(id),
-        available: encoders.contains(id),
-        hardware: id.contains("_nvenc")
-            || id.contains("_qsv")
-            || id.contains("_amf")
-            || id.contains("videotoolbox"),
+        available: encoders.contains(id) && hardware_supported,
+        hardware: hardware && hardware_supported,
     }
+}
+
+fn is_hardware_codec(id: &str) -> bool {
+    id.contains("_nvenc")
+        || id.contains("_qsv")
+        || id.contains("_amf")
+        || id.contains("videotoolbox")
+}
+
+fn hardware_codec_supported(id: &str, hardware_devices: &[String]) -> bool {
+    if id.contains("videotoolbox") {
+        return cfg!(target_os = "macos");
+    }
+
+    let joined = hardware_devices.join("\n").to_ascii_lowercase();
+    if id.contains("_nvenc") {
+        return joined.contains("nvidia")
+            || joined.contains("geforce")
+            || joined.contains("quadro");
+    }
+    if id.contains("_qsv") {
+        return joined.contains("intel");
+    }
+    if id.contains("_amf") {
+        return joined.contains("amd") || joined.contains("radeon");
+    }
+    true
 }
 
 fn codec_label(id: &str) -> String {
@@ -234,6 +271,39 @@ fn parse_hwaccels(text: &str) -> Vec<String> {
         .filter(|line| !line.is_empty() && !line.starts_with("Hardware acceleration"))
         .map(String::from)
         .collect()
+}
+
+fn detect_hardware_devices() -> Vec<String> {
+    let output = if cfg!(windows) {
+        Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }",
+            ])
+            .output()
+    } else if cfg!(target_os = "macos") {
+        Command::new("system_profiler")
+            .arg("SPDisplaysDataType")
+            .output()
+    } else {
+        Command::new("sh")
+            .args(["-c", "lspci 2>/dev/null | grep -Ei 'vga|3d|display'"])
+            .output()
+    };
+
+    output
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn find_ffmpeg(configured: Option<String>) -> Option<String> {

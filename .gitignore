@@ -29,4 +29,6 @@ screen.png
 PLAN.md
 .agents/
 skills-lock.json
-src-tauri/resources/bin/
+ffprobe.exe
+ffplay.exe
+ffmpeg.exe

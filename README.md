@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="public/favicon.png" width="96" height="96" alt="SHIFTR logo" />
+  <img src="src-tauri\icons\Square107x107Logo.png" width="96" height="96" alt="SHIFTR logo" />
 </p>
 
 <h1 align="center">SHIFTR</h1>

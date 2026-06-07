@@ -5,7 +5,6 @@ import { getCurrentWebview } from '@tauri-apps/api/webview'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import {
   AlertCircle,
-  Bell,
   BookOpenCheck,
   Check,
   ChevronDown,
@@ -19,6 +18,7 @@ import {
   FileVideo,
   FolderOpen,
   HardDrive,
+  Languages,
   Pause,
   Pencil,
   Play,
@@ -36,6 +36,7 @@ type OverwritePolicy = 'rename' | 'overwrite'
 type AppMode = 'media' | 'documents'
 type DocumentOperation = 'imagesToPdf' | 'mergePdfs'
 type UserLevel = 'aware' | 'capable' | 'fluent'
+type AppLanguage = 'en' | 'ru'
 type ReleaseStatus = {
   latestVersion: string | null
   updateAvailable: boolean
@@ -245,7 +246,7 @@ const fallbackPreset: ConversionPreset = {
 const fallbackFormats: SupportedFormats = {
   video: ['mp4', 'mkv', 'mov', 'webm', 'avi'],
   audio: ['mp3', 'aac', 'm4a', 'ogg', 'opus', 'wav', 'flac'],
-  image: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff'],
+  image: ['png', 'jpg', 'jpeg', 'webp', 'bmp', 'tiff', 'ico'],
   document: ['pdf'],
   presets: [
     {
@@ -307,13 +308,17 @@ const targetSizes = ['Keep auto', '8', '10', '25', '50', '100', '250', '500', '1
 const fixedTargetSizes = [8, 10, 25, 50, 100, 250, 500, 1024]
 const qualityLevels = ['20', '40', '60', '80', '95']
 const userLevelStorageKey = 'shiftr.userLevel'
+const languageStorageKey = 'shiftr.language'
 const previewEnabledStorageKey = 'shiftr.previewEnabled'
 const jobTooltipDelayMs = 1500
+const fallbackQueueRowHeight = 82
+const queueRowGap = 12
 const appVersion = __APP_VERSION__
 const githubReleasesRepo = __GITHUB_RELEASES_REPO__
 
 function App() {
   const [userLevel, setUserLevelState] = useState<UserLevel>(() => storedUserLevel() ?? 'capable')
+  const [appLanguage, setAppLanguage] = useState<AppLanguage>(() => storedLanguage())
   const [isOnboardingOpen, setIsOnboardingOpen] = useState(() => storedUserLevel() === null)
   const [activeMode, setActiveMode] = useState<AppMode>('media')
   const [formats, setFormats] = useState<SupportedFormats>(fallbackFormats)
@@ -346,6 +351,9 @@ function App() {
   const [previewEnabled, setPreviewEnabled] = useState(() => storedPreviewEnabled())
   const [previewState, setPreviewState] = useState<PreviewState>({ key: null, loading: false, error: null, result: null })
   const [outputSizeEstimate, setOutputSizeEstimate] = useState<OutputSizeEstimateState>({ key: null, loading: false, error: null, result: null })
+  const [queuePage, setQueuePage] = useState(0)
+  const [queueItemsPerPage, setQueueItemsPerPage] = useState(6)
+  const queueListRef = useRef<HTMLElement | null>(null)
   const jobTooltipTimerRef = useRef<number | null>(null)
 
   const selectedPreset = useMemo(
@@ -384,6 +392,19 @@ function App() {
   const isBatchModalOpen = batchGroups.length > 0
   const isDocumentModalOpen = documentSetup !== null
   const tooltipJob = jobTooltip ? jobs.find((job) => job.id === jobTooltip.jobId) : null
+  const queueTotalPages = Math.max(1, Math.ceil(jobs.length / queueItemsPerPage))
+  const safeQueuePage = Math.min(queuePage, queueTotalPages - 1)
+  const visibleJobs = jobs.slice(
+    safeQueuePage * queueItemsPerPage,
+    safeQueuePage * queueItemsPerPage + queueItemsPerPage,
+  )
+  const queuePageItems = useMemo(
+    () => paginationItems(queueTotalPages, safeQueuePage),
+    [queueTotalPages, safeQueuePage],
+  )
+  const isQueueProcessing = isRunning || summary.running > 0
+  const queueStatusLabel = jobs.length && isQueueProcessing ? 'Estimated time' : 'Queue status'
+  const queueStatusValue = queueStatusText(jobs, summary, isQueueProcessing)
   const activePreviewKey = activeGroup ? batchPreviewKey(activeGroup) : null
   const visiblePreviewState = previewState.key === activePreviewKey
     ? previewState
@@ -402,6 +423,32 @@ function App() {
   }), [ffmpegPath, outputDir, parallelism, selectedPreset, targetFormat])
 
   useEffect(() => () => clearJobTooltipTimer(), [])
+
+  useEffect(() => {
+    const list = queueListRef.current
+    if (!list) return
+
+    const updateItemsPerPage = () => {
+      const row = list.querySelector<HTMLElement>('.job-row')
+      const rowHeight = row?.offsetHeight || fallbackQueueRowHeight
+      const availableHeight = list.clientHeight
+      const nextItemsPerPage = Math.max(
+        1,
+        Math.floor((availableHeight + queueRowGap) / (rowHeight + queueRowGap)),
+      )
+      setQueueItemsPerPage((current) => (current === nextItemsPerPage ? current : nextItemsPerPage))
+    }
+
+    updateItemsPerPage()
+    const observer = new ResizeObserver(updateItemsPerPage)
+    observer.observe(list)
+    window.addEventListener('resize', updateItemsPerPage)
+
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', updateItemsPerPage)
+    }
+  }, [jobs.length])
 
   useEffect(() => {
     localStorage.setItem(previewEnabledStorageKey, previewEnabled ? 'true' : 'false')
@@ -1042,6 +1089,14 @@ function App() {
     )
   }
 
+  function toggleLanguage() {
+    setAppLanguage((current) => {
+      const next = current === 'en' ? 'ru' : 'en'
+      localStorage.setItem(languageStorageKey, next)
+      return next
+    })
+  }
+
   async function applyEncodingPreset(preset: EncodingPreset) {
     try {
       const updated = await invoke<ConversionJob[]>('apply_encoding_recipe_to_queued', { preset })
@@ -1163,7 +1218,9 @@ function App() {
     <main className="app-shell">
       <header className="top-nav">
         <div className="brand">
-          <span className="brand-mark" aria-hidden="true">↔</span>
+          <span className="brand-mark" aria-hidden="true">
+            <img src="/favicon.png" alt="" />
+          </span>
           <span>SHIFTR</span>
         </div>
 
@@ -1193,8 +1250,14 @@ function App() {
           <button className="nav-icon" type="button" onClick={() => setIsSettingsOpen(true)} title="Settings">
             <Settings2 size={22} />
           </button>
-          <button className="nav-icon" type="button" title="Notifications">
-            <Bell size={21} />
+          <button
+            className="language-toggle"
+            type="button"
+            onClick={toggleLanguage}
+            title={appLanguage === 'en' ? 'Switch language to Russian' : 'Switch language to English'}
+          >
+            <Languages size={19} />
+            <span>{appLanguage.toUpperCase()}</span>
           </button>
         </div>
       </header>
@@ -1243,16 +1306,16 @@ function App() {
           </button>
         </section>
 
-        <section className="queue-list">
+        <section className="queue-list" ref={queueListRef}>
           {jobs.length === 0 ? (
             <div className="empty-state">
               <CloudUpload size={26} />
               <span>Select files to build a conversion queue.</span>
             </div>
           ) : (
-            jobs.map((job) => (
+            visibleJobs.map((job) => (
               <article
-                className={`job-row ${job.status}`}
+                className={`job-row ${job.status} ${job.category}`}
                 key={job.id}
                 onBlur={hideJobTooltip}
                 onFocus={(event) => scheduleJobTooltip(job.id, event.currentTarget)}
@@ -1358,6 +1421,45 @@ function App() {
             ))
           )}
         </section>
+
+        {jobs.length > 0 && queueTotalPages > 1 && (
+          <nav className="queue-pagination" aria-label="Queue pages">
+            <span>
+              {safeQueuePage * queueItemsPerPage + 1}-{Math.min(jobs.length, (safeQueuePage + 1) * queueItemsPerPage)} of {jobs.length}
+            </span>
+            <div>
+              <button
+                type="button"
+                onClick={() => setQueuePage((page) => Math.max(0, page - 1))}
+                disabled={safeQueuePage === 0}
+              >
+                Prev
+              </button>
+              {queuePageItems.map((item, index) => (
+                item === 'ellipsis' ? (
+                  <span className="queue-page-ellipsis" key={`ellipsis-${index}`}>...</span>
+                ) : (
+                  <button
+                    key={item}
+                    type="button"
+                    className={item === safeQueuePage ? 'active' : ''}
+                    onClick={() => setQueuePage(item)}
+                    aria-current={item === safeQueuePage ? 'page' : undefined}
+                  >
+                    {item + 1}
+                  </button>
+                )
+              ))}
+              <button
+                type="button"
+                onClick={() => setQueuePage((page) => Math.min(queueTotalPages - 1, page + 1))}
+                disabled={safeQueuePage === queueTotalPages - 1}
+              >
+                Next
+              </button>
+            </div>
+          </nav>
+        )}
       </section>
 
       {tooltipJob && jobTooltip && (
@@ -1404,8 +1506,8 @@ function App() {
               <div style={{ width: `${Math.round(summary.average * 100)}%` }} />
             </div>
             <div className="queue-eta">
-              <span>{jobs.length ? 'Estimated time' : 'Queue status'}</span>
-              <strong>{jobs.length ? (summary.queueEta != null ? formatProcessingTime(summary.queueEta) : 'Estimating...') : 'No jobs queued'}</strong>
+              <span>{queueStatusLabel}</span>
+              <strong>{queueStatusValue}</strong>
             </div>
             <dl>
               <div><dt>Running</dt><dd>{summary.running}</dd></div>
@@ -1418,7 +1520,7 @@ function App() {
 
         <div className="panel-footer">
           <button type="button" className="start-processing" onClick={startQueue} disabled={!jobs.length || isRunning}>
-            <Play size={16} /> Start Processing
+            <Play size={16} /> Start
           </button>
         </div>
       </aside>
@@ -2133,8 +2235,45 @@ function storedUserLevel(): UserLevel | null {
   return value === 'aware' || value === 'capable' || value === 'fluent' ? value : null
 }
 
+function storedLanguage(): AppLanguage {
+  return localStorage.getItem(languageStorageKey) === 'ru' ? 'ru' : 'en'
+}
+
 function storedPreviewEnabled() {
   return localStorage.getItem(previewEnabledStorageKey) !== 'false'
+}
+
+function queueStatusText(
+  jobs: ConversionJob[],
+  summary: { completed: number; failed: number; running: number; average: number; queueEta: number | null },
+  isProcessing: boolean,
+) {
+  if (!jobs.length) return 'No jobs queued'
+  if (isProcessing) return summary.queueEta != null ? formatProcessingTime(summary.queueEta) : 'Estimating...'
+  if (summary.completed + summary.failed === jobs.length && (summary.completed > 0 || summary.failed > 0)) {
+    return 'Finished'
+  }
+  return 'Ready to start'
+}
+
+function paginationItems(totalPages: number, currentPage: number): Array<number | 'ellipsis'> {
+  if (totalPages <= 7) {
+    return Array.from({ length: totalPages }, (_, index) => index)
+  }
+
+  const pages = new Set([0, totalPages - 1, currentPage - 1, currentPage, currentPage + 1])
+  const sorted = [...pages]
+    .filter((page) => page >= 0 && page < totalPages)
+    .sort((a, b) => a - b)
+
+  return sorted.reduce<Array<number | 'ellipsis'>>((items, page, index) => {
+    const previous = sorted[index - 1]
+    if (previous != null && page - previous > 1) {
+      items.push('ellipsis')
+    }
+    items.push(page)
+    return items
+  }, [])
 }
 
 function userLevelTitle(level: UserLevel) {
@@ -2736,11 +2875,11 @@ function compatibilityProfile(
 function imageCompatibilityProfile(targetFormat: string, options?: AdvancedOptions | null): CompatibilityProfile {
   const format = targetFormat.toLowerCase()
   const lossyQuality = options?.imageQuality ?? 86
-  const web: CompatibilityRating = ['jpg', 'jpeg', 'png', 'webp'].includes(format) ? 'Excellent' : 'Medium'
-  const apple: CompatibilityRating = ['jpg', 'jpeg', 'png'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : 'Medium'
-  const windows: CompatibilityRating = ['jpg', 'jpeg', 'png', 'bmp'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : 'Medium'
-  const size: CompatibilityRating = format === 'webp' ? 'High' : ['jpg', 'jpeg'].includes(format) ? 'Medium' : format === 'png' ? 'Medium' : 'Low'
-  const quality: CompatibilityRating = ['png', 'tiff'].includes(format) ? 'Excellent' : lossyQuality >= 86 ? 'High' : lossyQuality >= 60 ? 'Medium' : 'Low'
+  const web: CompatibilityRating = ['jpg', 'jpeg', 'png', 'webp'].includes(format) ? 'Excellent' : format === 'ico' ? 'Medium' : 'Medium'
+  const apple: CompatibilityRating = ['jpg', 'jpeg', 'png'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : format === 'ico' ? 'Medium' : 'Medium'
+  const windows: CompatibilityRating = ['jpg', 'jpeg', 'png', 'bmp', 'ico'].includes(format) ? 'Excellent' : format === 'webp' ? 'High' : 'Medium'
+  const size: CompatibilityRating = format === 'webp' ? 'High' : ['jpg', 'jpeg'].includes(format) ? 'Medium' : format === 'ico' ? 'Medium' : format === 'png' ? 'Medium' : 'Low'
+  const quality: CompatibilityRating = ['png', 'tiff', 'ico'].includes(format) ? 'Excellent' : lossyQuality >= 86 ? 'High' : lossyQuality >= 60 ? 'Medium' : 'Low'
   return { web, apple, windows, size, quality }
 }
 

@@ -6,6 +6,7 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, anyhow};
+use image::ImageEncoder;
 use std::{
     path::{Path, PathBuf},
     process::Stdio,
@@ -699,6 +700,19 @@ fn save_image_with_preset(
                 .encode_image(&image)
                 .context("Failed to encode JPEG")?;
         }
+        "ico" => {
+            let icon = image.resize(256, 256, image::imageops::FilterType::Lanczos3);
+            let rgba = icon.to_rgba8();
+            let file = std::fs::File::create(output_path).context("Failed to create ICO output")?;
+            image::codecs::ico::IcoEncoder::new(file)
+                .write_image(
+                    rgba.as_raw(),
+                    rgba.width(),
+                    rgba.height(),
+                    image::ExtendedColorType::Rgba8,
+                )
+                .context("Failed to encode ICO")?;
+        }
         _ => image.save(output_path).context("Failed to encode image")?,
     }
     Ok(())
@@ -983,5 +997,35 @@ mod tests {
             message,
             "FFmpeg could not complete this conversion. (Error code: 123)"
         );
+    }
+
+    #[test]
+    fn encodes_large_png_as_ico() {
+        let source_image = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            512,
+            512,
+            image::Rgba([83, 255, 171, 255]),
+        ));
+        let output = std::env::temp_dir().join(format!(
+            "shiftr-test-{}.ico",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        save_image_with_preset(
+            source_image,
+            output.to_str().unwrap(),
+            QualityMode::KeepSource,
+            None,
+        )
+        .unwrap();
+
+        assert!(output.is_file());
+        let decoded = image::open(&output).unwrap();
+        assert!(decoded.width() <= 256);
+        assert!(decoded.height() <= 256);
+        let _ = std::fs::remove_file(output);
     }
 }

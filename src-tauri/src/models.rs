@@ -293,7 +293,7 @@ pub struct QueueUpdate {
 
 pub const VIDEO_FORMATS: &[&str] = &["mp4", "mkv", "mov", "webm", "avi"];
 pub const AUDIO_FORMATS: &[&str] = &["mp3", "aac", "m4a", "ogg", "opus", "wav", "flac"];
-pub const IMAGE_FORMATS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff"];
+pub const IMAGE_FORMATS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "tiff", "ico"];
 pub const DOCUMENT_FORMATS: &[&str] = &["pdf"];
 
 pub fn category_for_extension(ext: &str) -> FileCategory {
@@ -373,6 +373,7 @@ mod tests {
         assert_eq!(category_for_extension("mp4"), FileCategory::Video);
         assert_eq!(category_for_extension(".flac"), FileCategory::Audio);
         assert_eq!(category_for_extension("webp"), FileCategory::Image);
+        assert_eq!(category_for_extension("ico"), FileCategory::Image);
         assert_eq!(category_for_extension("pdf"), FileCategory::Document);
         assert_eq!(category_for_extension("zip"), FileCategory::Unsupported);
     }

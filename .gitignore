@@ -29,6 +29,7 @@ screen.png
 PLAN.md
 .agents/
 skills-lock.json
-ffprobe.exe
-ffplay.exe
-ffmpeg.exe
+
+# Bundled FFmpeg binaries are downloaded in CI or placed locally by developers.
+src-tauri/resources/bin/*
+!src-tauri/resources/bin/.gitkeep

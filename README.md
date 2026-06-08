@@ -90,8 +90,6 @@ Users can replace the FFmpeg path in settings if they prefer their own build.
 
 SHIFTR is in active development. The current focus is the desktop conversion workflow, UI polish, smart recipes, preview tools, codec detection, and practical batch handling.
 
-If this is the kind of converter you want to see exist, a star helps the project get discovered.
-
 ## License
 
 This project is licensed under the [GNU GPL v3.0](LICENSE).
